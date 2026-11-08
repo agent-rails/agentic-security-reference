@@ -45,7 +45,8 @@ def request_digest(tool: str, resource: str, args: dict[str, Any], nonce: str) -
     """What the agent's leaf proof binds: the exact tool, resource, arguments and nonce, and nothing the
     executor chooses, so an agent can compute it before sending."""
     body = canonicalize({"tool": tool, "resource": resource, "args": args, "nonce": nonce})
-    return sha256_b64u(REQUEST_DOMAIN + body)
+    digest: str = sha256_b64u(REQUEST_DOMAIN + body)
+    return digest
 
 
 def derive_op_id(tenant_id: str, task_id: str, leaf_binding: str, digest_of_request: str) -> str:
@@ -66,7 +67,7 @@ def _concrete_id(label: str, value: Any) -> str:
     problem = validate_entry(value)
     if problem or "*" in value:
         raise ProtocolError(f"{label} must be a concrete id: {problem or 'no wildcards'}")
-    return value
+    return str(value)
 
 
 def decode_request(frame: bytes) -> Request:
