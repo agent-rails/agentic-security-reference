@@ -1,18 +1,29 @@
 from __future__ import annotations
 
+import json
+import os
+import stat
+import subprocess
+import sys
+import time
 from collections.abc import Callable
 from dataclasses import replace
+from datetime import UTC, datetime
+from pathlib import Path
 
 from agent_warrant.identity import generate_keypair
+from agent_warrant.ledger import TaskLedger
 
-from executor.credentials import sign_effect_proof
-from executor.protocol import args_digest
+from executor.credentials import HmacMinter, sign_effect_proof
+from executor.protocol import args_digest, encode_request
 from executor.targets import EffectCall, Target, TargetRefused
 
 from .agents import Agent
-from .faults import CapturingTarget
+from .faults import CapturingTarget, CrashingMinter, FlakyLedger
 from .story import Story
-from .world import DEPLOY_SCOPE, PRINCIPAL, TENANT
+from .world import DEPLOY_SCOPE, EXECUTOR_ID, PRINCIPAL, TENANT, World
+
+REPO = Path(__file__).resolve().parent.parent
 
 DEPLOY = ("deploy.service", "env/staging/api", {"image": "api:1"})
 
@@ -186,6 +197,180 @@ def rogue_issuer(story: Story) -> None:
         story.expect("effects performed", len(world.effects("deploy-api")), 0)
 
 
+def kill_levers(story: Story) -> None:
+    """Two independent stops: the effect stop refuses new credentials, the authority stop revokes chains."""
+    with story.world() as world:
+        world.start_in_process()
+        operator = world.operator()
+        first, second = Agent("first"), Agent("second")
+        world.root_for(first, task_id="task-1")
+        world.root_for(second, task_id="task-2")
+        story.outcome("before any stop", world.send(first, *DEPLOY, "n1"), "done")
+        operator.suspend("incident 42", actor="operator:oncall")
+        story.say("effect stop: operator suspended credential injection")
+        for agent in (first, second):
+            story.outcome("a request while suspended", world.send(agent, *DEPLOY, "n2"), "refused", "suspended")
+        try:
+            operator.resume("agent-or-anyone-else")
+        except PermissionError:
+            story.say("resume by anyone but the named releaser raised PermissionError")
+        else:
+            story.expect("resume by anyone but the named releaser", "accepted", "refused")
+        story.outcome("still suspended", world.send(first, *DEPLOY, "n3"), "refused", "suspended")
+        operator.resume("operator:oncall")
+        story.outcome("after the named releaser resumed", world.send(first, *DEPLOY, "n4"), "done")
+        operator.revoke_tenant("tenant-a")
+        story.say("authority stop: operator revoked the tenant in the ledger")
+        for agent in (first, second):
+            story.outcome(
+                "a request after tenant revocation", world.send(agent, *DEPLOY, "n5"), "refused", "chain_invalid"
+            )
+        story.expect("effects performed", len(world.effects("deploy-api")), 2)
+        story.say("limit: a credential already issued stays valid until its ttl (30 s here); the stops act on new ones")
+
+
+def crash_recovery(story: Story) -> None:
+    """A crash between steps never issues two credentials and never loses track of what may have happened."""
+    with story.world() as world:
+        flaky: list[FlakyLedger] = []
+
+        def wrap(ledger: TaskLedger) -> FlakyLedger:
+            flaky.append(FlakyLedger(ledger, "mark_issued"))
+            return flaky[0]
+
+        running = world.start_in_process(ledger_wrapper=wrap)
+        agent = Agent("agent")
+        world.root_for(agent)
+        response = world.send(agent, *DEPLOY, "n1")
+        story.outcome("crash after the reservation, before issuing", response, "refused", "reservation_refused")
+        story.expect(
+            "no effect and no credential yet", (len(world.effects("deploy-api")), issuance_count(world)), (0, 0)
+        )
+        response = world.send(agent, *DEPLOY, "n1")
+        story.outcome("the agent retries the same request", response, "done")
+        story.expect(
+            "one effect, one credential, cost charged once",
+            (len(world.effects("deploy-api")), issuance_count(world)),
+            (1, 1),
+        )
+        story.expect("spent", running.built.ledger.task_budget(TENANT, "task-1", world.now).spent, 1)
+    with story.world() as world:
+        minter = CrashingMinter(HmacMinter(world.clock), crashes=1)
+        running = world.start_in_process(minter=minter)
+        agent = Agent("agent")
+        world.root_for(agent)
+        response = world.send(agent, *DEPLOY, "n1")
+        story.outcome("crash while minting, after the issuance record", response, "outcome_unknown", "mint_failed")
+        story.outcome(
+            "the agent retries the same request", world.send(agent, *DEPLOY, "n1"), "refused", "already_outcome_unknown"
+        )
+        story.expect("no second credential was minted", (minter.attempts, issuance_count(world)), (1, 1))
+        story.expect("no effect was performed", len(world.effects("deploy-api")), 0)
+        reservation = running.built.ledger.reservation(TENANT, "task-1", response["op_id"], world.now)
+        story.expect("ledger surfaces the operation for an operator", reservation.state, "outcome_unknown")
+        story.expect(
+            "its cost stays spent, never credited back",
+            running.built.ledger.task_budget(TENANT, "task-1", world.now).spent,
+            1,
+        )
+        terminal = [row for row in world.audit_rows() if row["event"] == "terminal"]
+        story.expect("evidence records the unknown outcome", terminal[-1]["outcome"], "unknown")
+
+
+def issuance_count(world: World) -> int:
+    path = world.exec_dir / "issuance.jsonl"
+    return len(path.read_text().splitlines()) if path.exists() else 0
+
+
+def persona_deviation(story: Story) -> None:
+    """In-scope but unusual: the call is allowed, a deterministic check over the evidence flags it, the
+    executor is suspended."""
+    with story.world() as world:
+        world.start_in_process()
+        operator = world.operator()
+        agent = story.name(Agent("agent"), "release-bot")
+        world.root_for(agent, purpose="release-bot")
+        for number in range(1, 4):
+            story.outcome(f"baseline deploy {number}", world.send(agent, *DEPLOY, f"b{number}"), "done")
+        boundary = datetime.now(UTC)
+        response = world.send(agent, "deploy.rollback", "env/staging/api", {}, "x1")
+        story.outcome("in scope, policy allows, never used by this persona before", response, "done")
+        started = time.perf_counter()
+        outcomes = operator.route_alerts(boundary)
+        story.expect("alert response", [(o.action, o.applied) for o in outcomes], [("suspend", True)])
+        story.say(f"signal to suspension: {(time.perf_counter() - started) * 1000:.0f} ms (detector run over the log)")
+        story.outcome("next request", world.send(agent, *DEPLOY, "n9"), "refused", "suspended")
+        story.expect("detection is after the fact: the flagged call was performed", len(world.effects("deploy-api")), 4)
+
+
+def alert_stops_live_chain(story: Story) -> None:
+    """An alert revokes the task root in the ledger; a live delegation chain stops mid-task."""
+    with story.world() as world:
+        running = world.start_in_process()
+        operator = world.operator()
+        alice = story.name(Agent("alice"), "release-bot")
+        bob = story.name(Agent("bob"), "deploy-helper")
+        world.root_for(alice, purpose="release-bot", budget=50)
+        alice.delegate_to(bob, scope=DEPLOY_SCOPE, budget=20, ttl=600, now=world.now)
+        for number in range(1, 4):
+            story.outcome(f"baseline deploy {number}", world.send(bob, *DEPLOY, f"b{number}"), "done")
+        boundary = datetime.now(UTC)
+        story.outcome(
+            "first use of resource env/staging/web",
+            world.send(bob, "deploy.service", "env/staging/web", {}, "x1"),
+            "done",
+        )
+        outcomes = operator.route_alerts(boundary)
+        story.expect(
+            "alert response", [(o.action, o.applied, o.reason) for o in outcomes], [("revoke_task", True, "revoked")]
+        )
+        for agent in (bob, alice):
+            response = world.send(agent, *DEPLOY, "after")
+            story.outcome(f"{story.who(agent.public_key)} after the alert", response, "refused", "chain_invalid")
+        status = running.built.ledger.task_budget(TENANT, "task-1", world.now)
+        story.expect("budget left unspent on the revoked task", status.budget - status.spent, 46)
+
+
+def enforced_mode(story: Story) -> None:
+    """The executor runs as its own process and holds every secret; the agent process holds none."""
+    with story.world(real_time=True) as world:
+        running = world.start_process()
+        agent = Agent("agent")
+        world.root_for(agent)
+        frames = [
+            encode_request(
+                agent.request(
+                    audience=EXECUTOR_ID, now=world.now, tool=DEPLOY[0], resource=DEPLOY[1], args=DEPLOY[2], nonce="n1"
+                )
+            ).decode()
+        ]
+        environment = {"PATH": os.environ["PATH"]}
+        argv = [sys.executable, "-m", "demo.agent_process", str(running.socket_path)]
+        result = subprocess.run(
+            argv, input=json.dumps(frames), capture_output=True, text=True, env=environment, cwd=REPO, timeout=60
+        )
+        story.expect("agent process exit code", result.returncode, 0)
+        report = json.loads(result.stdout)
+        story.expect("the agent process got its effect", report["responses"][0]["status"], "done")
+        secrets = [value.decode() for value in world.secrets.values()]
+        story.expect(
+            "no secret in the agent's argv or environment",
+            any(s in " ".join(report["argv"]) + " ".join(report["env"].values()) for s in secrets),
+            False,
+        )
+        story.expect(
+            "no secret or credential in what the executor returned",
+            any(s in result.stdout for s in secrets) or "mac" in result.stdout,
+            False,
+        )
+        story.expect("socket mode", oct(stat.S_IMODE(running.socket_path.stat().st_mode)), "0o600")
+        story.expect("socket directory mode", oct(stat.S_IMODE(running.socket_path.parent.stat().st_mode)), "0o700")
+        story.expect("ledger mode", oct(stat.S_IMODE(world.ledger_path.stat().st_mode)), "0o600")
+        story.say(
+            "limits: same OS user can still read these files; egress is not restricted (no egress proxy is built)"
+        )
+
+
 SCENARIOS: list[tuple[int, str, Callable[[Story], None]]] = [
     (1, "happy path through one delegation hop", happy_path),
     (2, "budget exhaustion across hops", budget_exhaustion),
@@ -193,4 +378,9 @@ SCENARIOS: list[tuple[int, str, Callable[[Story], None]]] = [
     (4, "mid-chain revocation stops only that subtree", mid_chain_revocation),
     (5, "a stolen credential fails at the target", stolen_credential),
     (6, "a rogue issuer is refused by the trust policy", rogue_issuer),
+    (7, "kill levers: effect stop and authority stop", kill_levers),
+    (8, "crash recovery without double issue", crash_recovery),
+    (9, "enforced mode: executor in its own process", enforced_mode),
+    (10, "in-scope action outside the persona is flagged and suspended", persona_deviation),
+    (11, "an alert stops a live delegation chain", alert_stops_live_chain),
 ]
