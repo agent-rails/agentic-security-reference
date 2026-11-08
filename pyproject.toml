@@ -7,7 +7,7 @@ requires-python = ">=3.13"
 license = { text = "Apache-2.0" }
 authors = [{ name = "voltagebots" }]
 dependencies = [
-    "agent-warrant @ git+https://github.com/agent-rails/agent-warrant@80d091e8258395cde8dad119087f5b1d2fa86ef8",
+    "agent-warrant @ git+https://github.com/agent-rails/agent-warrant@e03427fb12edc74b930be2df48634535ef33f871",
     "toolcall-authz @ git+https://github.com/agent-rails/agent-guard@f12a648eae45256b9a393d9271aa1d20094f366f",
 ]
 
