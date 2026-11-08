@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from executor.client import send_request
 from executor.config import Built, build_executor
 from executor.credentials import write_executor_key
+from executor.operator import Operator
 from executor.protocol import Request
 from executor.server import SOCKET_NAME, ExecutorServer
 from executor.targets import Target
@@ -146,6 +147,15 @@ class World:
             "executor_key_file": str(self.exec_dir / "executor.key"),
             "secrets_dir": str(self.exec_dir / "secrets"),
             "releaser": "operator:oncall",
+            "alert_key_file": str(self.exec_dir / "alert.key"),
+            "alert_state_dir": str(self.exec_dir / "alert-state"),
+            "alert_max_age": 300,
+            "alert_policy": {
+                "first_tool_use": "suspend",
+                "first_resource_use": "revoke_task",
+                "rate_above_baseline": "suspend",
+                "outside_usual_hours": "report_only",
+            },
             "max_credential_ttl": 30,
             "reservation_ttl": 60,
             "issuers": {
@@ -212,6 +222,9 @@ class World:
             raise RuntimeError(f"executor did not start: {banner!r}")
         self.running = Running(self.exec_dir / "run" / SOCKET_NAME, process=process)
         return self.running
+
+    def operator(self) -> Operator:
+        return Operator(self.config, self.clock)
 
     def stop(self) -> None:
         if self.running is not None:
