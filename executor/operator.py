@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import dataclasses
+import fcntl
 import hashlib
 import json
 import os
@@ -21,13 +21,16 @@ from .credentials import EmptySecretStore
 
 WRITER_ID = "detector"
 ALERT_KEY_MIN_BYTES = 32
-CURSOR_NAME = "routed-until"
+ROUTED_FILE = "routed.jsonl"
+ROUTED_LOCK = "routed.lock"
+FINAL_REASONS = frozenset({"suspended", "revoked", "report_only", "no_task_root"})
 
 
-def alert_id(alert: Alert) -> str:
-    """The same detected event always gets the same id, so the sink refuses it when a later scan finds it again."""
-    body = json.dumps(dataclasses.asdict(alert), sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(body.encode()).hexdigest()[:32]
+def alert_key(alert: Alert) -> str:
+    """One detected event: its kind, persona, tenant and time. An aggregate that grows within the same time bucket
+    keeps its key, so it is acted on once."""
+    body = json.dumps([alert.kind, alert.persona, alert.tenant_id, alert.ts], separators=(",", ":"))
+    return hashlib.sha256(body.encode()).hexdigest()
 
 
 class AuditIntegrityError(Exception):
@@ -116,40 +119,51 @@ class Operator:
 
     def route_alerts(self, evaluate_from: datetime, **detect_options: Any) -> list[AlertOutcome]:
         """Detect persona deviations after `evaluate_from` (earlier rows are the baseline) and apply the
-        configured response to each alert not routed before. Returns one outcome per newly routed alert.
+        configured response to each alert not yet routed to a final outcome. Returns one outcome per alert acted on.
 
-        Refuses to act when any row fails verification or parsing. Row MACs prove each row is unaltered, not that
-        the log is complete: a deleted or truncated row is invisible here. A persisted cursor (the latest alert
-        time routed) keeps a rescan of the same log from acting twice, also after the sink's replay window."""
+        Refuses to act when any row fails verification or parsing, so a damaged log stops automatic response until
+        an operator repairs it. Row MACs prove each row is unaltered, not that the log is complete: a deleted or
+        truncated row is invisible here. Each alert whose action reached a final outcome (suspended, revoked,
+        report only, no task root) is recorded in the alert state directory and never acted on again; any other
+        outcome, or an action that raises, is retried on the next scan. Scans hold a lock, so two never interleave."""
         result = detect_file(
             self._audit_path, DetectConfig(evaluate_from=evaluate_from, **detect_options), secret=self._audit_key
         )
         if result.untrusted or result.malformed:
             counts = f"{result.untrusted} unverified and {result.malformed} malformed rows"
             raise AuditIntegrityError(f"audit log has {counts}; no alert was routed")
-        cursor = self._read_cursor()
-        fresh = [alert for alert in result.alerts if cursor is None or datetime.fromisoformat(alert.ts) > cursor]
-        outcomes = [
-            self._sink.handle(sign_alert(alert, self._alert_key, WRITER_ID, int(self._clock()), alert_id(alert)))
-            for alert in fresh
-        ]
-        if fresh:
-            self._write_cursor(max(datetime.fromisoformat(alert.ts) for alert in fresh))
-        return outcomes
-
-    def _read_cursor(self) -> datetime | None:
-        path = self._alert_state_dir / CURSOR_NAME
-        if not path.exists():
-            return None
-        return datetime.fromisoformat(path.read_text().strip())
-
-    def _write_cursor(self, routed_until: datetime) -> None:
-        path = self._alert_state_dir / CURSOR_NAME
-        temporary = path.with_name(f".{CURSOR_NAME}.{os.getpid()}")
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        lock = os.open(self._alert_state_dir / ROUTED_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
-            os.write(descriptor, routed_until.isoformat().encode())
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            routed = self._read_routed()
+            outcomes = []
+            for alert in result.alerts:
+                key = alert_key(alert)
+                if key in routed:
+                    continue
+                outcome = self._sink.handle(sign_alert(alert, self._alert_key, WRITER_ID, int(self._clock())))
+                outcomes.append(outcome)
+                if outcome.reason in FINAL_REASONS:
+                    self._record_routed(key, outcome)
+                    routed.add(key)
+            return outcomes
+        finally:
+            os.close(lock)
+
+    def _read_routed(self) -> set[str]:
+        try:
+            descriptor = os.open(self._alert_state_dir / ROUTED_FILE, os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            return set()
+        with os.fdopen(descriptor, "rb") as handle:
+            return {json.loads(line)["key"] for line in handle if line.strip()}
+
+    def _record_routed(self, key: str, outcome: AlertOutcome) -> None:
+        line = json.dumps({"key": key, "action": outcome.action, "reason": outcome.reason}) + "\n"
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
+        descriptor = os.open(self._alert_state_dir / ROUTED_FILE, flags, 0o600)
+        try:
+            os.write(descriptor, line.encode())
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
-        os.replace(temporary, path)

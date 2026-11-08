@@ -132,3 +132,103 @@ def test_operator_refuses_an_alert_state_dir_others_can_reach(world):
     os.chmod(state, 0o770)
     with pytest.raises(ValueError, match="alert_state_dir"):
         world.operator()
+
+
+def stub_detector(monkeypatch, batches):
+    from agent_guard.detect import DetectResult
+
+    import executor.operator as operator_module
+
+    def detect(path, config, secret):
+        return DetectResult(str(path), 0, 0, 0, 0, list(batches.pop(0)), untrusted=0, verified=True)
+
+    monkeypatch.setattr(operator_module, "detect_file", detect)
+
+
+def alert(kind, ts, count=1):
+    from agent_guard.detect import Alert
+
+    return Alert(kind=kind, persona="p", tenant_id="tenant-a", ts=ts, detail=f"{kind} x{count}", count=count)
+
+
+LATER = "2026-11-08T17:09:03+00:00"
+BUCKET = "2026-11-08T17:00:00+00:00"
+FUTURE = "2026-11-09T17:00:00+00:00"
+
+
+def test_alert_dated_before_an_already_routed_alert_still_acts(world, monkeypatch):
+    stub_detector(
+        monkeypatch,
+        [[alert("first_tool_use", LATER)], [alert("first_tool_use", LATER), alert("rate_above_baseline", BUCKET)]],
+    )
+    operator = world.operator()
+    assert [o.reason for o in operator.route_alerts(datetime.now(UTC))] == ["suspended"]
+    operator.resume("operator:oncall")
+    assert [o.reason for o in operator.route_alerts(datetime.now(UTC))] == ["suspended"]
+
+
+def test_alert_after_a_future_dated_alert_still_acts(world, monkeypatch):
+    stub_detector(
+        monkeypatch,
+        [[alert("first_tool_use", FUTURE)], [alert("first_tool_use", FUTURE), alert("first_tool_use", LATER)]],
+    )
+    operator = world.operator()
+    operator.route_alerts(datetime.now(UTC))
+    operator.resume("operator:oncall")
+    assert [o.reason for o in operator.route_alerts(datetime.now(UTC))] == ["suspended"]
+
+
+def test_a_growing_aggregate_in_the_same_bucket_acts_once(world, monkeypatch):
+    stub_detector(monkeypatch, [[alert("rate_above_baseline", BUCKET, 3)], [alert("rate_above_baseline", BUCKET, 5)]])
+    operator = world.operator()
+    operator.route_alerts(datetime.now(UTC))
+    operator.resume("operator:oncall")
+    assert operator.route_alerts(datetime.now(UTC)) == []
+
+
+def test_alert_whose_action_did_not_complete_is_retried(world, monkeypatch):
+    stub_detector(monkeypatch, [[alert("first_tool_use", LATER)], [alert("first_tool_use", LATER)]])
+    operator = world.operator()
+    seen = world.exec_dir / "alert-state" / "seen-alerts.jsonl"
+    seen.write_text("not json\n")
+    assert [o.reason for o in operator.route_alerts(datetime.now(UTC))] == ["seen_state_unreadable"]
+    seen.unlink()
+    assert [o.reason for o in operator.route_alerts(datetime.now(UTC))] == ["suspended"]
+
+
+def test_alert_whose_action_raised_is_retried(world, monkeypatch):
+    stub_detector(monkeypatch, [[alert("first_tool_use", LATER)], [alert("first_tool_use", LATER)]])
+    operator = world.operator()
+    real_suspend = operator._injector.suspend
+    calls = []
+
+    def failing_once(*arguments, **keywords):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("disk full")
+        return real_suspend(*arguments, **keywords)
+
+    monkeypatch.setattr(operator._injector, "suspend", failing_once)
+    with pytest.raises(OSError, match="disk full"):
+        operator.route_alerts(datetime.now(UTC))
+    assert [o.reason for o in operator.route_alerts(datetime.now(UTC))] == ["suspended"]
+    assert operator.suspended is True
+
+
+def test_concurrent_scans_wait_for_each_other(world, monkeypatch):
+    import fcntl
+    import threading
+
+    stub_detector(monkeypatch, [[alert("first_tool_use", LATER)]])
+    operator = world.operator()
+    results = []
+    lock_path = world.exec_dir / "alert-state" / "routed.lock"
+    with open(lock_path, "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        scan = threading.Thread(target=lambda: results.append(operator.route_alerts(datetime.now(UTC))))
+        scan.start()
+        scan.join(0.5)
+        assert scan.is_alive()
+        fcntl.flock(held, fcntl.LOCK_UN)
+    scan.join(10)
+    assert [o.reason for o in results[0]] == ["suspended"]
