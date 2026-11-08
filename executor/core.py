@@ -170,7 +170,7 @@ class Executor:
         try:
             self._ledger.open_task(TaskRootResult(valid=True, reason="ok", root=root, checked_at=now), now)
             operation = Operation(
-                op_id=derive_op_id(root.tenant_id, root.task_id, digest),
+                op_id=derive_op_id(root.tenant_id, root.task_id, leaf.binding(), digest),
                 tenant_id=root.tenant_id,
                 task_id=root.task_id,
                 leaf_binding=leaf.binding(),
