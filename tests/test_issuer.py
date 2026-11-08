@@ -24,6 +24,7 @@ from issuer import (
 
 IDP = "https://idp.example.com/"
 AUDIENCE = "task-root-issuer"
+NOW = 1_800_000_000
 
 
 @pytest.fixture(scope="module")
@@ -55,16 +56,13 @@ def issuer_key():
 
 @pytest.fixture
 def issuer(idp_key, issuer_key):
-    return OidcTaskRootIssuer(
-        make_config(), StaticJwks(jwks_for(idp_key)), issuer_key, ISSUER_ID, lambda: 1_800_000_000
-    )
+    return OidcTaskRootIssuer(make_config(), StaticJwks(jwks_for(idp_key)), issuer_key, ISSUER_ID, lambda: NOW)
 
 
-def token(idp_key, kid="k1", algorithm="RS256", **claims):
-    now = int(time.time())
-    payload = {"iss": IDP, "aud": AUDIENCE, "sub": "alice", "org": "acme", "exp": now + 300, "iat": now, **claims}
+def token(idp_key, kid="k1", algorithm="RS256", now=NOW, headers=None, **claims):
+    payload = {"iss": IDP, "aud": AUDIENCE, "sub": "alice", "org": "acme", "exp": now + 3600, "iat": now, **claims}
     payload = {key: value for key, value in payload.items() if value is not None}
-    return jwt.encode(payload, idp_key, algorithm=algorithm, headers={"kid": kid})
+    return jwt.encode(payload, idp_key, algorithm=algorithm, headers={"kid": kid, **(headers or {})})
 
 
 def request(**overrides):
@@ -96,8 +94,10 @@ def test_valid_token_yields_a_signed_task_root_with_claims_from_the_token(issuer
     [
         {"iss": "https://evil.example.com/"},
         {"aud": "someone-else"},
-        {"exp": int(time.time()) - 3600},
-        {"nbf": int(time.time()) + 3600},
+        {"exp": NOW - 3600},
+        {"nbf": NOW + 3600},
+        {"iat": NOW + 3600},
+        {"exp": True},
         {"exp": None},
         {"sub": None},
         {"org": "unknown-org"},
@@ -120,7 +120,7 @@ def test_unknown_kid_is_refused(issuer, idp_key):
 
 
 def test_unsigned_token_is_refused(issuer, idp_key):
-    now = int(time.time())
+    now = NOW
     unsigned = jwt.encode(
         {"iss": IDP, "aud": AUDIENCE, "sub": "alice", "org": "acme", "exp": now + 300},
         None,
@@ -135,7 +135,7 @@ def test_hmac_token_keyed_with_the_public_key_is_refused(issuer, idp_key):
     public_pem = idp_key.public_key().public_bytes(
         serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
     )
-    now = int(time.time())
+    now = NOW
 
     def segment(value):
         return b64u(json.dumps(value).encode())
@@ -154,7 +154,7 @@ def test_token_signed_with_an_algorithm_outside_the_allowlist_is_refused(idp_key
     ec_key = ec.generate_private_key(ec.SECP256R1())
     document = json.loads(jwt.algorithms.ECAlgorithm.to_jwk(ec_key.public_key()))
     jwks = {"keys": [{**document, "kid": "e1", "use": "sig", "alg": "ES256"}]}
-    restricted = OidcTaskRootIssuer(make_config(), StaticJwks(jwks), issuer_key, ISSUER_ID, lambda: 1_800_000_000)
+    restricted = OidcTaskRootIssuer(make_config(), StaticJwks(jwks), issuer_key, ISSUER_ID, lambda: NOW)
     with pytest.raises(IssuanceRefused):
         restricted.issue(token(ec_key, kid="e1", algorithm="ES256"), request())
 
@@ -168,6 +168,9 @@ def test_request_cannot_exceed_the_tenant_rule(issuer, idp_key):
         {"max_depth": 4},
         {"ttl": 3601},
         {"ttl": 0},
+        {"ttl": True},
+        {"budget": "5"},
+        {"max_depth": 2.0},
     ):
         with pytest.raises(IssuanceRefused):
             issuer.issue(good, request(**overrides))
@@ -198,10 +201,130 @@ def test_end_to_end_oidc_token_to_effect(idp_key, issuer_key):
     try:
         issuing = OidcTaskRootIssuer(make_config(), StaticJwks(jwks_for(idp_key)), issuer_key, ISSUER_ID, time.time)
         agent = Agent("alice")
-        agent.root = issuing.issue(token(idp_key), request(subject=agent.public_key))
+        agent.root = issuing.issue(token(idp_key, now=int(time.time())), request(subject=agent.public_key))
         response = world.send(agent, "deploy.service", "env/staging/api", {"image": "api:1"}, "n1")
         assert response["status"] == "done"
         row = world.audit_rows()[0]
         assert (row["principal"], row["tenant_id"], row["purpose"]) == ("user:alice", TENANT, "release-bot")
     finally:
         world.stop()
+
+
+def test_task_root_never_outlives_the_id_token(issuer, idp_key):
+    root = issuer.issue(token(idp_key, exp=NOW + 5), request(ttl=600))
+    assert (root.issued_at, root.expires_at) == (NOW, NOW + 5)
+
+
+def test_token_expired_within_the_leeway_is_refused_rather_than_minting_an_expired_root(issuer, idp_key):
+    with pytest.raises(IssuanceRefused, match="expire"):
+        issuer.issue(token(idp_key, exp=NOW - 5), request())
+
+
+def test_token_times_are_checked_against_the_issuer_clock_not_wall_time(idp_key, issuer_key):
+    later = OidcTaskRootIssuer(make_config(), StaticJwks(jwks_for(idp_key)), issuer_key, ISSUER_ID, lambda: NOW + 7200)
+    with pytest.raises(IssuanceRefused, match="expired"):
+        later.issue(token(idp_key), request())
+
+
+@pytest.mark.parametrize("typ", ["at+jwt", "AT+JWT", "application/at+jwt"])
+def test_access_token_is_refused(issuer, idp_key, typ):
+    with pytest.raises(IssuanceRefused, match="access token"):
+        issuer.issue(token(idp_key, headers={"typ": typ}), request())
+
+
+@pytest.mark.parametrize(
+    "claims",
+    [
+        {"aud": ["other-client", AUDIENCE], "azp": "other-client"},
+        {"aud": ["other-client", AUDIENCE]},
+        {"azp": "other-client"},
+    ],
+)
+def test_token_issued_to_another_client_is_refused(issuer, idp_key, claims):
+    with pytest.raises(IssuanceRefused, match="azp"):
+        issuer.issue(token(idp_key, **claims), request())
+
+
+def test_token_with_this_client_as_authorized_party_is_accepted(issuer, idp_key):
+    root = issuer.issue(token(idp_key, aud=["other-client", AUDIENCE], azp=AUDIENCE), request())
+    assert root.principal == "user:alice"
+
+
+@pytest.mark.parametrize("leeway", [-1, 61, 10**9, True, 1.5])
+def test_config_refuses_an_unsafe_leeway(leeway):
+    with pytest.raises(ValueError, match="leeway"):
+        make_config(leeway_seconds=leeway)
+
+
+@pytest.mark.parametrize("prefix", ["", "user", "user/"])
+def test_config_refuses_a_principal_prefix_without_a_delimiter(prefix):
+    with pytest.raises(ValueError, match="principal_prefix"):
+        make_config(principal_prefix=prefix)
+
+
+@pytest.mark.parametrize("subject", ["alice:admin", "*", "svc:deployer"])
+def test_principal_claim_with_a_delimiter_or_wildcard_is_refused(issuer, idp_key, subject):
+    with pytest.raises(IssuanceRefused, match="principal"):
+        issuer.issue(token(idp_key, sub=subject), request())
+
+
+def test_unverified_email_is_never_a_principal(idp_key, issuer_key):
+    by_email = OidcTaskRootIssuer(
+        make_config(principal_claim="email"), StaticJwks(jwks_for(idp_key)), issuer_key, ISSUER_ID, lambda: NOW
+    )
+    for verified in (False, None, "true"):
+        with pytest.raises(IssuanceRefused, match="email_verified"):
+            by_email.issue(token(idp_key, email="ceo@acme.example", email_verified=verified), request())
+    root = by_email.issue(token(idp_key, email="ceo@acme.example", email_verified=True), request())
+    assert root.principal == "user:ceo@acme.example"
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        {"max_budget": -1},
+        {"max_depth": 0},
+        {"max_ttl": 86401},
+        {"max_ttl": True},
+        {"ceiling_scope": {"tools": "deploy.*"}},
+    ],
+)
+def test_tenant_rule_refuses_values_outside_what_a_task_root_can_carry(rule):
+    values = {"ceiling_scope": FULL_SCOPE, "max_budget": 500, "max_depth": 3, "max_ttl": 3600}
+    with pytest.raises(ValueError):
+        TenantRule(**{**values, **rule})
+
+
+def test_issued_root_does_not_share_the_request_scope(issuer, idp_key):
+    asked = request()
+    root = issuer.issue(token(idp_key), asked)
+    asked.scope["tools"].append("admin.*")
+    assert root.scope["tools"] == ["deploy.*"]
+
+
+def test_jwks_key_whose_alg_differs_from_the_token_alg_is_refused(idp_key, issuer_key):
+    jwks = jwks_for(idp_key)
+    pss = OidcTaskRootIssuer(
+        make_config(algorithms=("RS256", "PS256")), StaticJwks(jwks), issuer_key, ISSUER_ID, lambda: NOW
+    )
+    with pytest.raises(IssuanceRefused, match="alg"):
+        pss.issue(token(idp_key, algorithm="PS256"), request())
+
+
+def test_token_without_a_kid_is_refused(issuer, idp_key):
+    payload = {"iss": IDP, "aud": AUDIENCE, "sub": "alice", "org": "acme", "exp": NOW + 3600, "iat": NOW}
+    with pytest.raises(IssuanceRefused, match="kid"):
+        issuer.issue(jwt.encode(payload, idp_key, algorithm="RS256"), request())
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda keys: [{**keys[0], "use": "enc"}],
+        lambda keys: [{key: value for key, value in keys[0].items() if key != "kid"}],
+        lambda keys: [keys[0], keys[0]],
+    ],
+)
+def test_jwks_refuses_encryption_keys_missing_kids_and_duplicate_kids(idp_key, mutate):
+    with pytest.raises(ValueError, match="JWKS"):
+        StaticJwks({"keys": mutate(jwks_for(idp_key)["keys"])})
