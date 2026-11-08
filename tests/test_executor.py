@@ -428,24 +428,57 @@ def test_world_writes_its_config_private_to_the_executor_user(world):
 
 
 @pytest.mark.parametrize(
-    ("event", "outcome", "effects"),
-    [("terminal", "returned", 1), ("terminal", "unknown", 0)],
+    ("fault", "effects", "retry"),
+    [
+        ("terminal_returned_write", 1, ("refused", "already_done")),
+        ("terminal_unknown_write", 0, ("refused", "already_outcome_unknown")),
+        ("sign_effect_proof", 0, ("outcome_unknown", "already_issued")),
+    ],
 )
 def test_a_failure_after_the_credential_was_issued_is_never_reported_as_a_refusal(
-    world, alice, monkeypatch, event, outcome, effects
+    world, alice, monkeypatch, fault, effects, retry
 ):
-    running = world.start_in_process() if effects else world.start_in_process(minter=_FailingMinter())
+    from executor import core
+
+    running = world.start_in_process(minter=_FailingMinter()) if fault == "terminal_unknown_write" else None
+    running = running or world.start_in_process()
     evidence = running.built.executor._evidence
     real_write = evidence.write
+    failing = {"terminal_returned_write": ("terminal", "returned"), "terminal_unknown_write": ("terminal", "unknown")}
 
     def write(**fields):
-        if (fields["event"], fields["outcome"]) == (event, outcome):
+        if (fields["event"], fields["outcome"]) == failing.get(fault) and fields.get(
+            "error"
+        ) != "internal_error_after_issue":
             raise OSError("disk full")
         return real_write(**fields)
 
+    def sign(*arguments):
+        raise RuntimeError("signing failed")
+
     monkeypatch.setattr(evidence, "write", write)
+    if fault == "sign_effect_proof":
+        monkeypatch.setattr(core, "sign_effect_proof", sign)
     response = world.send(alice, *DEPLOY, "n1")
     assert (response["status"], response["reason"]) == ("outcome_unknown", "internal_error_after_issue")
     assert response["op_id"]
     assert len(world.effects("deploy-api")) == effects
-    assert world.send(alice, *DEPLOY, "n1")["status"] != "done"
+    second = world.send(alice, *DEPLOY, "n1")
+    assert (second["status"], second["reason"]) == retry
+    assert len(world.effects("deploy-api")) == effects
+
+
+def test_a_failure_after_issue_leaves_a_terminal_evidence_row(world, alice, monkeypatch):
+    from executor import core
+
+    world.start_in_process()
+
+    def sign(*arguments):
+        raise RuntimeError("signing failed")
+
+    monkeypatch.setattr(core, "sign_effect_proof", sign)
+    world.send(alice, *DEPLOY, "n1")
+    terminal = [row for row in world.audit_rows() if row["event"] == "terminal"]
+    assert [(row["outcome"], row["executed"], row["error"]) for row in terminal] == [
+        ("unknown", False, "internal_error_after_issue")
+    ]
