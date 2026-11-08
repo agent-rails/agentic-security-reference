@@ -235,34 +235,40 @@ class Executor:
             except (Refused, LedgerUnavailable) as err:
                 return refuse("reservation_refused", "ledger", stamp, str(err))
 
-            record("release", "pending", False)
-            injected = injector.inject(cast(OperationLike, operation), cast(ReservationLike, reservation))
-            if isinstance(injected, Refusal):
-                if injected.reason in ("already_issued", "mint_failed"):
-                    return self._unknown(operation, now, finish, False, injected.reason)
-                record("terminal", "not_dispatched", False, injected.reason)
-                return _response("refused", f"injector_{injected.reason}", op_id=operation.op_id, trace_id=trace_id)
+            try:
+                record("release", "pending", False)
+                injected = injector.inject(cast(OperationLike, operation), cast(ReservationLike, reservation))
+                if isinstance(injected, Refusal):
+                    if injected.reason in ("already_issued", "mint_failed"):
+                        return self._unknown(operation, now, finish, False, injected.reason)
+                    record("terminal", "not_dispatched", False, injected.reason)
+                    return _response("refused", f"injector_{injected.reason}", op_id=operation.op_id, trace_id=trace_id)
 
-            call = EffectCall(
-                credential=injected.credential,
-                proof=sign_effect_proof(self._executor_key, injected.credential),
-                operation=operation.signable_fields(),
-                args=request.args,
-            )
-            try:
-                result = target.perform(call)
-            except TargetRefused as err:
-                return self._unknown(operation, now, finish, False, "target_refused", str(err))
-            except Exception as err:
-                return self._unknown(operation, now, finish, True, "target_error", f"{type(err).__name__}: {err}")
-            try:
-                reservation = self._ledger.mark_done(operation.tenant_id, operation.task_id, operation.op_id, now)
-            except (Refused, LedgerUnavailable) as err:
-                return finish("outcome_unknown", "effect_done_ledger_not_updated", "unknown", True, str(err))
-            record("terminal", "returned", True)
-            return _response(
-                "done", "ok", op_id=operation.op_id, trace_id=trace_id, state=reservation.state, result=result
-            )
+                call = EffectCall(
+                    credential=injected.credential,
+                    proof=sign_effect_proof(self._executor_key, injected.credential),
+                    operation=operation.signable_fields(),
+                    args=request.args,
+                )
+                try:
+                    result = target.perform(call)
+                except TargetRefused as err:
+                    return self._unknown(operation, now, finish, False, "target_refused", str(err))
+                except Exception as err:
+                    return self._unknown(operation, now, finish, True, "target_error", f"{type(err).__name__}: {err}")
+                try:
+                    reservation = self._ledger.mark_done(operation.tenant_id, operation.task_id, operation.op_id, now)
+                except (Refused, LedgerUnavailable) as err:
+                    return finish("outcome_unknown", "effect_done_ledger_not_updated", "unknown", True, str(err))
+                record("terminal", "returned", True)
+                return _response(
+                    "done", "ok", op_id=operation.op_id, trace_id=trace_id, state=reservation.state, result=result
+                )
+            except Exception:
+                traceback.print_exc(file=sys.stderr)
+                return _response(
+                    "outcome_unknown", "internal_error_after_issue", op_id=operation.op_id, trace_id=trace_id
+                )
         finally:
             with self._in_flight_lock:
                 self._in_flight.discard(op_id)
