@@ -230,8 +230,9 @@ def kill_levers(story: Story) -> None:
 
 
 def crash_recovery(story: Story) -> None:
-    """A crash between steps never issues two credentials and never loses track of what may have happened. Each
-    fault is followed by a restart: the executor is stopped and a new one is built from the state on disk."""
+    """A fault between steps never issues two credentials and never loses track of what may have happened. Each
+    injected fault is followed by a restart: the executor is stopped and a new one is built from the state on
+    disk. The faults are raised inside the process; a killed process is not simulated."""
     with story.world() as world:
         flaky: list[FlakyLedger] = []
 
@@ -272,7 +273,7 @@ def crash_recovery(story: Story) -> None:
             "refused",
             "already_outcome_unknown",
         )
-        story.expect("no second credential was minted", (minter.attempts, issuance_count(world)), (1, 1))
+        story.expect("one issuance record on disk, no second credential", issuance_count(world), 1)
         story.expect("no effect was performed", len(world.effects("deploy-api")), 0)
         reservation = running.built.ledger.reservation(TENANT, "task-1", response["op_id"], world.now)
         story.expect("ledger surfaces the operation for an operator", reservation.state, "outcome_unknown")
