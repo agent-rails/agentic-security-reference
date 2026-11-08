@@ -42,7 +42,7 @@ Built means exercised by a test in this repository. The evidence for each row is
 | Mode | What it is | Custody claim |
 |---|---|---|
 | Advisory | agent-guard in the agent's process | none: records and steers; same-user code can bypass or roll back state |
-| Enforced | the executor in its own process holds all secrets and performs effects | the agent process holds no secret; egress is not restricted because no egress proxy is built, so the agent must run with egress denied |
+| Enforced | the executor in its own process holds all secrets and performs effects | the agent process holds no secret. With `agent_uid` and `agent_gid` set, the agent runs as another OS user and cannot read the executor's files (tested on Linux in CI); without them, the agent shares the executor's user and can read them. Egress is not restricted because no egress proxy is built, so the agent must run with egress denied |
 | Isolated | enforced plus a sandbox (VM or container) around the agent | not built |
 
 ## Adoption paths
@@ -61,6 +61,8 @@ The reader surface is four records: `TaskRoot`, `ChainLink`, `LeafProof` and `Op
 |---|---|---|
 | Ed25519 | `TaskRoot` (issuer key), `ChainLink` (parent holder key), `LeafProof` (leaf holder key), the executor's proof over a credential (executor key) | each signer; verifiable without sharing a secret |
 | HMAC-SHA256 | audit records (audit key), alerts (alert key), the credential MAC (the target's secret) | shared between signer and verifier |
+
+The alert key protects alerts written by a separate detector. Alerts the operator detects and routes itself are signed and checked inside one process, so the key adds nothing there.
 
 ## MCP
 
@@ -109,6 +111,6 @@ finally:
 | `issuer/` | OIDC task-root issuer |
 | `demo/` | scenarios and the world they run in |
 | `tests/` | unit and integration tests; the scenarios run as tests |
-| `docs/` | architecture, threat model, decisions, risk mapping |
+| `docs/` | architecture, threat model, decisions, risk mapping, operations |
 
 Every fenced `sh` or `python` block in the docs is either run by `tests/test_docs_commands.py` or is a command that `.github/workflows/ci.yml` runs.

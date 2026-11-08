@@ -40,14 +40,26 @@ The adapters between agent-warrant and agent-guard are in this repository's `exe
 - Strictness over leniency: a request with an unknown field is refused, including any identity field, rather than having the field ignored.
 - The ledger is opened, never created, by the executor. The demo creates it as the operator would.
 
+## Separate-user mode
+
+- The agent runs as its own non-root OS user (`agent_uid`) in a group the executor belongs to (`agent_gid`). The run directory is 0710 and the socket 0660, both owned by that group, so other local users cannot reach the socket; the kernel's peer credentials then admit only `agent_uid`. A world-open socket with only the peer check was rejected because any local user could fill the listen backlog.
+- `run_dir` must be an absolute path with no symlink in it, and no directory above it may be owned by another user or writable by others unless sticky. The configuration must be owned by the executor's user and not writable by others.
+
 ## Issuer
 
 - A small OIDC task-root issuer maps verified ID-token claims to principal and tenant by configuration. It uses PyJWT for token verification; no token parsing is hand-written.
 - Entra, Okta and similar providers sit in front of the issuer and produce the ID token. They are not issuers in the executor's trust policy.
+- One clock: `exp`, `nbf` and `iat` are checked against the issuer's clock, with leeway of at most 60 seconds, and a root's expiry is capped at the token's `exp`.
+- The guard against tokens meant for another client is the audience and `azp`, not `typ`: most providers type access tokens plain `JWT`.
+- The principal claim must be a stable opaque id such as `sub` or `oid`. It may not contain `*` or any delimiter the trust policy splits prefixes on, so email addresses are refused.
 
 ## Detection responses
 
 Alerts are routed through agent-guard's authenticated alert sink. A suspend alert suspends injection. A revoke alert revokes the task root binding in the ledger, which stops every chain below it.
+
+- Each detected event is keyed by kind, persona, tenant, time and task roots, plus the tool or resource for a first-use alert, and recorded only after its action reaches a final outcome. A time cursor was tried and rejected: it dropped hour-bucket alerts, alerts whose action failed, and every alert after a future-dated row.
+- Delivery is at least once, failing toward stopping.
+- Routing refuses to act on an audit log with a row that fails verification or parsing, rather than acting on what is left; an operator repairs the log ([OPERATIONS.md](OPERATIONS.md)).
 
 ## Tooling
 
