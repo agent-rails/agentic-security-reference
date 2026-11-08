@@ -10,6 +10,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
+from typing import cast
 
 from .core import Executor
 from .peer import check_supported, peer_uid
@@ -55,7 +56,8 @@ class _Handler(socketserver.BaseRequestHandler):
             frame = read_frame(connection, time.monotonic() + FRAME_DEADLINE_SECONDS)
         except (ProtocolError, OSError):
             return
-        response = self.server.executor.handle(frame)
+        server = cast(ExecutorServer, self.server)
+        response = server.executor.handle(frame)
         try:
             connection.settimeout(FRAME_DEADLINE_SECONDS)
             write_frame(connection, json.dumps(response).encode())

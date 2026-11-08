@@ -14,7 +14,8 @@ def send_frame(socket_path: Path, frame: bytes, timeout: float = 30.0) -> dict[s
         connection.settimeout(timeout)
         connection.connect(str(socket_path))
         write_frame(connection, frame)
-        return json.loads(read_frame(connection, time.monotonic() + timeout))
+        response: dict[str, Any] = json.loads(read_frame(connection, time.monotonic() + timeout))
+        return response
 
 
 def send_request(socket_path: Path, request: Request, timeout: float = 30.0) -> dict[str, Any]:

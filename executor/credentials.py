@@ -92,7 +92,9 @@ class HmacMinter:
     def __init__(self, clock: Callable[[], float]) -> None:
         self._clock = clock
 
-    def mint(self, secret: bytes, executor_key_id: str, audience: str, request_digest: str, ttl: float) -> dict:
+    def mint(
+        self, secret: bytes, executor_key_id: str, audience: str, request_digest: str, ttl: float
+    ) -> dict[str, Any]:
         body = {
             "v": CREDENTIAL_VERSION,
             "kid": executor_key_id,

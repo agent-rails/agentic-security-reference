@@ -6,7 +6,7 @@ import threading
 import traceback
 import uuid
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, cast
 
 from agent_guard.audit import MemoryAuditSink
 from agent_guard.decision import Decision, Verdict
@@ -18,7 +18,7 @@ from agent_warrant.resolver import IssuerResolver
 from agent_warrant.scope import covers
 from agent_warrant.task_root import TaskRootResult
 from agent_warrant.trust import IssuerTrustPolicy
-from agentguard_identity.credentials import CredentialInjector, Refusal
+from agentguard_identity.credentials import CredentialInjector, OperationLike, Refusal, ReservationLike
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from .costs import CostError, CostSchedule
@@ -131,18 +131,19 @@ class Executor:
             expected_audience=self._executor_id,
             expected_request_digest=digest,
         )
-        if not chain.valid:
+        if not chain.valid or chain.root is None or chain.leaf_scope is None:
             return refuse("chain_invalid", "chain-invalid", None, chain.reason)
-        stamp = Stamp.from_chain(chain)
         root = chain.root
+        scope = chain.leaf_scope
         leaf = chain.links[-1] if chain.links else root
-        if not covers(chain.leaf_scope, request.tool, request.resource):
+        stamp = Stamp.from_chain(root, chain.links)
+        if not covers(scope, request.tool, request.resource):
             return refuse("out_of_scope", "scope", stamp)
         try:
             cost = self._costs.cost(request.tool, request.args)
         except CostError as err:
             return refuse("cost_unavailable", "cost-schedule", stamp, str(err))
-        if cost > chain.leaf_scope["max_cost_per_call"]:
+        if cost > scope["max_cost_per_call"]:
             return refuse("cost_over_call_cap", "scope-cost", stamp, f"cost {cost}")
         target = self._targets.get(request.tool)
         injector = self._injectors.get(request.tool)
@@ -235,7 +236,7 @@ class Executor:
                 return refuse("reservation_refused", "ledger", stamp, str(err))
 
             record("release", "pending", False)
-            injected = injector.inject(operation, reservation)
+            injected = injector.inject(cast(OperationLike, operation), cast(ReservationLike, reservation))
             if isinstance(injected, Refusal):
                 if injected.reason in ("already_issued", "mint_failed"):
                     return self._unknown(operation, now, finish, False, injected.reason)

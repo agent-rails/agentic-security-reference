@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from agent_guard.audit import AuditSink, build_record
 from agent_guard.decision import Decision, Verdict
-from agent_warrant.chain import ChainVerifyResult
+from agent_warrant.chain import ChainLink
+from agent_warrant.task_root import TaskRoot
 
 UNVERIFIED = "unverified"
 
@@ -24,11 +26,10 @@ class Stamp:
     purpose: str
 
     @classmethod
-    def from_chain(cls, chain: ChainVerifyResult) -> Stamp:
+    def from_chain(cls, root: TaskRoot, links: Sequence[ChainLink]) -> Stamp:
         """`actor` is the leaf holder's public key, `parent_actor` the key that delegated to it (the task root's
         issuer when the root's own subject acts), `principal` and `purpose` the signed task root's."""
-        root = chain.root
-        leaf = chain.links[-1] if chain.links else root
+        leaf = links[-1] if links else root
         return cls(
             task_root=root.binding(),
             grant_hash=leaf.binding(),

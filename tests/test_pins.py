@@ -50,3 +50,10 @@ def test_ci_runs_the_separate_user_test_as_a_second_os_user():
     assert "ASR_AGENT_USER: asr-agent" in workflow
     assert "ASR_AGENT_GROUP: asr-agents" in workflow
     assert "tests/test_separate_user.py" in workflow
+
+
+def test_type_check_is_strict_and_runs_in_ci():
+    config = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["mypy"]
+    assert config["strict"] is True
+    assert "executor" in config["files"]
+    assert "- run: mypy" in (ROOT / ".github" / "workflows" / "ci.yml").read_text()
