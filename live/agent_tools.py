@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import stat
 import sys
 import time
 import uuid
@@ -22,6 +24,8 @@ from executor.client import send_request
 from executor.protocol import Request, encode_request, request_digest
 
 PROTOCOL_VERSION = "2025-06-18"
+MAX_LINE_CHARACTERS = 1_048_576
+MAX_DOCUMENT_BYTES = 65_536
 SERVER_INFO = {"name": "agent-tools", "version": "0.1.0"}
 
 TOOLS: list[dict[str, Any]] = [
@@ -80,6 +84,7 @@ class AgentState:
     socket_path: Path
     workspace: Path
     call_log: Path
+    env_log: Path | None = None
 
     @property
     def leaf(self) -> TaskRoot | ChainLink:
@@ -96,6 +101,7 @@ class AgentState:
             socket_path=Path(data["socket_path"]),
             workspace=Path(data["workspace"]),
             call_log=Path(data["call_log"]),
+            env_log=Path(data["env_log"]) if data.get("env_log") else None,
         )
 
 
@@ -120,7 +126,9 @@ class AgentTools:
 
     def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if name == "read_document":
-            return {"document": self._read_document(str(arguments["name"]))}
+            document = self._read_document(str(arguments["name"]))
+            self._log({"ts": self._clock(), "tool": "read_document", "resource": str(arguments["name"])})
+            return {"document": document}
         tool, resource, args = effect_for(name, arguments)
         request = self._request(tool, resource, args)
         started = time.monotonic()
@@ -161,15 +169,52 @@ class AgentTools:
         )
 
     def _read_document(self, name: str) -> str:
-        workspace = self._state.workspace.resolve()
-        path = (workspace / name).resolve()
-        if path.parent != workspace or not path.is_file():
+        """Reads one regular file directly inside the workspace: no path separators, no symlinks, size capped."""
+        if not name or "/" in name or "\0" in name or name in (".", ".."):
             raise ToolError(f"no document named {name!r}")
-        return path.read_text()
+        directory = os.open(self._state.workspace, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            try:
+                descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+            except OSError:
+                raise ToolError(f"no document named {name!r}") from None
+        finally:
+            os.close(directory)
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode):
+                raise ToolError(f"no document named {name!r}")
+            if info.st_size > MAX_DOCUMENT_BYTES:
+                raise ToolError(f"document {name!r} is over {MAX_DOCUMENT_BYTES} bytes")
+            return os.read(descriptor, MAX_DOCUMENT_BYTES + 1).decode()
+        finally:
+            os.close(descriptor)
 
     def _log(self, entry: dict[str, Any]) -> None:
         with self._state.call_log.open("a") as handle:
             handle.write(json.dumps(entry, sort_keys=True) + "\n")
+
+
+def error(message_id: Any, code: int, text: str) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": message_id, "error": {"code": code, "message": text}}
+
+
+def reply_to(tools: AgentTools, line: str) -> dict[str, Any] | None:
+    """One line of JSON-RPC in, at most one reply out. Malformed input gets an error reply, never a crash."""
+    if len(line) > MAX_LINE_CHARACTERS:
+        return error(None, -32600, "message is too long")
+    try:
+        message = json.loads(line)
+    except ValueError:
+        return error(None, -32700, "parse error")
+    if not isinstance(message, dict):
+        return error(None, -32600, "message must be an object")
+    if "params" in message and not isinstance(message["params"], dict):
+        return error(message.get("id"), -32602, "params must be an object") if "id" in message else None
+    try:
+        return handle_message(tools, message)
+    except Exception as err:
+        return error(message.get("id"), -32603, f"internal error: {type(err).__name__}")
 
 
 def handle_message(tools: AgentTools, message: dict[str, Any]) -> dict[str, Any] | None:
@@ -189,8 +234,11 @@ def handle_message(tools: AgentTools, message: dict[str, Any]) -> dict[str, Any]
         reply["result"] = {"tools": TOOLS}
     elif method == "tools/call":
         params = message.get("params", {})
+        arguments = params.get("arguments") or {}
         try:
-            result = tools.call(str(params.get("name")), dict(params.get("arguments") or {}))
+            if not isinstance(arguments, dict):
+                raise ToolError("arguments must be an object")
+            result = tools.call(str(params.get("name")), arguments)
             reply["result"] = {"content": [{"type": "text", "text": json.dumps(result)}], "isError": False}
         except (ToolError, KeyError, ValueError, OSError) as err:
             reply["result"] = {"content": [{"type": "text", "text": f"error: {err}"}], "isError": True}
@@ -201,11 +249,24 @@ def handle_message(tools: AgentTools, message: dict[str, Any]) -> dict[str, Any]
     return reply
 
 
+def read_line(reader: TextIO) -> str | None:
+    """The next line, or an over-long marker without holding more than the limit in memory; None at end of input."""
+    line = reader.readline(MAX_LINE_CHARACTERS + 1)
+    if not line:
+        return None
+    if len(line) > MAX_LINE_CHARACTERS and not line.endswith("\n"):
+        while True:
+            rest = reader.readline(MAX_LINE_CHARACTERS)
+            if not rest or rest.endswith("\n"):
+                break
+    return line
+
+
 def serve(tools: AgentTools, reader: TextIO, writer: TextIO) -> None:
-    for line in reader:
+    while (line := read_line(reader)) is not None:
         if not line.strip():
             continue
-        reply = handle_message(tools, json.loads(line))
+        reply = reply_to(tools, line)
         if reply is not None:
             writer.write(json.dumps(reply) + "\n")
             writer.flush()
@@ -216,7 +277,10 @@ def main(argv: list[str] | None = None) -> int:
     if len(arguments) != 1:
         print("usage: python -m live.agent_tools <agent-state.json>", file=sys.stderr)
         return 2
-    serve(AgentTools(AgentState.load(Path(arguments[0]))), sys.stdin, sys.stdout)
+    state = AgentState.load(Path(arguments[0]))
+    if state.env_log is not None:
+        state.env_log.write_text(json.dumps(sorted(os.environ)))
+    serve(AgentTools(state), sys.stdin, sys.stdout)
     return 0
 
 

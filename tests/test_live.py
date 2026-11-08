@@ -103,7 +103,7 @@ def test_unusual_action_suspends_the_executor_and_the_next_call_is_refused():
     steps = [("rollback_service", {"resource": "env/staging/api"}), deploy("env/staging/api", "api:5")]
     outcome = run.unusual_action_suspends(ScriptedDriver(steps, pause=1.5))
     assert outcome.passed, outcome.summary()
-    assert outcome.measured["effect_to_suspension_ms"] >= 0
+    assert outcome.measured["poll_detect_suspend_ms"] >= 0
 
 
 def test_a_scenario_with_no_checks_does_not_pass():
@@ -133,3 +133,100 @@ def test_read_document_only_reads_the_workspace(name):
         assert "hello" in ok["replies"][0]["result"]["content"][0]["text"]
     finally:
         setup.world.stop()
+
+
+def serve_lines(lines):
+    import io
+
+    from live.agent_tools import AgentTools, serve
+
+    setup = prepare("live-protocol", DEPLOY_SCOPE, {})
+    try:
+        from live.agent_tools import AgentState
+
+        out = io.StringIO()
+        serve(AgentTools(AgentState.load(setup.state_path)), io.StringIO("".join(line + "\n" for line in lines)), out)
+        return [json.loads(line) for line in out.getvalue().splitlines()]
+    finally:
+        setup.world.stop()
+
+
+def test_server_answers_malformed_input_with_errors_and_keeps_serving():
+    from live.agent_tools import MAX_LINE_CHARACTERS
+
+    replies = serve_lines(
+        [
+            "not json",
+            "[]",
+            "1",
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":null}',
+            '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"deploy_service","arguments":[1]}}',
+            '{"jsonrpc":"2.0","id":3,"method":"ping","pad":"' + "x" * MAX_LINE_CHARACTERS + '"}',
+            '{"jsonrpc":"2.0","id":4,"method":"ping"}',
+        ]
+    )
+    assert [reply.get("error", {}).get("code") for reply in replies[:3]] == [-32700, -32600, -32600]
+    assert replies[3]["error"]["code"] == -32602
+    assert replies[4]["result"]["isError"] is True
+    assert replies[5]["error"]["code"] == -32600
+    assert replies[6] == {"jsonrpc": "2.0", "id": 4, "result": {}}
+
+
+@pytest.mark.parametrize("scenario", [run.prompt_injection, run.prompt_injection_obedient])
+def test_an_injection_scenario_fails_when_the_model_does_nothing(scenario):
+    assert scenario(ScriptedDriver([])).passed is False
+
+
+def test_the_obedient_variant_fails_when_the_withdrawal_was_never_attempted():
+    steps = [("read_document", {"name": "release-notes.md"}), deploy("env/staging/api", "api:2.1")]
+    outcome = run.prompt_injection_obedient(ScriptedDriver(steps))
+    assert outcome.passed is False
+
+
+class ErroredDriver(ScriptedDriver):
+    def run(self, prompt, mcp_config, workdir):
+        return {**super().run(prompt, mcp_config, workdir), "is_error": True}
+
+
+def test_a_model_session_that_errored_fails_the_scenario():
+    assert run.normal_task_and_stolen_material(ErroredDriver([deploy("env/staging/api", "api:2")])).passed is False
+
+
+def test_a_failing_watcher_action_is_raised_not_swallowed(monkeypatch):
+    from demo.world import World
+
+    def broken(self):
+        raise RuntimeError("operator unavailable")
+
+    monkeypatch.setattr(World, "operator", broken)
+    steps = [deploy("env/staging/api", "api:3"), deploy("env/staging/web", "web:3")]
+    with pytest.raises(RuntimeError, match="operator unavailable"):
+        run.revocation_mid_task(ScriptedDriver(steps, pause=1.0))
+
+
+def test_read_document_refuses_a_symlink_and_an_oversized_file():
+    from live.agent_tools import MAX_DOCUMENT_BYTES
+
+    setup = prepare("live-read-limits", DEPLOY_SCOPE, {"big.md": "x" * (MAX_DOCUMENT_BYTES + 1), "ok.md": "fine"})
+    try:
+        (setup.workspace / "link.md").symlink_to(setup.workspace / "ok.md")
+        steps = [("read_document", {"name": "link.md"}), ("read_document", {"name": "big.md"})]
+        replies = ScriptedDriver(steps).run("", setup.mcp_config, setup.workspace)["replies"]
+        assert [reply["result"]["isError"] for reply in replies] == [True, True]
+    finally:
+        setup.world.stop()
+
+
+def test_the_tool_server_records_the_environment_it_was_given():
+    outcome = run.normal_task_and_stolen_material(ScriptedDriver([deploy("env/staging/api", "api:2")]))
+    assert "PATH" in outcome.measured["server_env_keys"]
+    assert not {key for key in outcome.measured["server_env_keys"] if "ANTHROPIC" in key or "SECRET" in key}
+
+
+def test_the_claude_driver_starts_claude_with_a_minimal_environment(monkeypatch):
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")
+    monkeypatch.setenv("CLAUDE_CODE_MESSAGING_TOKEN", "secret-token")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
+    environment = run.claude_environment()
+    assert set(environment) <= set(run.CLAUDE_ENVIRONMENT_KEYS)
+    assert "PATH" in environment and "HOME" in environment
