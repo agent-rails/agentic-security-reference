@@ -8,12 +8,12 @@
 
 ## Defended
 
-Each line names a test that fails if the behaviour is removed.
+Each row cites a test that exercises the defence under its fixture. Where the defence is only partly tested, the row says so.
 
 | Threat | Defence | Test |
 |---|---|---|
 | Agent reads a secret or credential | secrets live in the executor process; the agent's argv, environment and responses contain none | `tests/test_enforced_process.py::test_agent_process_holds_no_secret_and_still_gets_its_effect`, `tests/test_enforced_process.py::test_response_never_carries_a_credential` |
-| Agent reads the executor's files | in separate-user mode the agent runs as another OS user; every file under the executor's directory is closed to it, and the socket admits only that user, checked against the kernel's peer credentials | `tests/test_separate_user.py::test_agent_running_as_another_user_cannot_read_secrets_but_gets_its_effect`, `tests/test_separate_user.py::test_executor_user_is_not_an_allowed_peer_in_separate_user_mode` |
+| Agent reads the executor's files | in separate-user mode the agent runs as another OS user; the executor refuses secrets, keys and a ledger that are not mode 0600, and the socket admits only that user, checked against the kernel's peer credentials. The configuration and audit log are closed to the agent only if the deployer makes them so; the test checks that every file its fixture creates is unreadable to the agent | `tests/test_separate_user.py::test_agent_running_as_another_user_cannot_read_secrets_but_gets_its_effect`, `tests/test_separate_user.py::test_executor_user_is_not_an_allowed_peer_in_separate_user_mode` |
 | Another local user reaches the socket | in separate-user mode the socket directory and socket are open only to the agent group | `tests/test_separate_user.py::test_user_outside_the_agent_group_cannot_reach_the_socket` |
 | Agent claims an identity, tenant or cost | the strict decoder refuses unknown fields; identity comes from the verified chain; cost comes from a policy-owned schedule | `tests/test_evidence_identity.py::test_identity_fields_supplied_by_the_agent_are_refused_and_never_recorded`, `tests/test_executor.py::test_agent_cannot_state_its_own_cost` |
 | Agent chooses or collides an operation id | the wire request has no `op_id`; the executor derives it from tenant, task, leaf record and request | `tests/test_executor.py::test_wire_request_has_no_op_id_field`, `tests/test_executor.py::test_two_holders_sending_the_same_request_are_two_operations` |
@@ -23,9 +23,9 @@ Each line names a test that fails if the behaviour is removed.
 | Validly signed root from an issuer that may not assert it | executor trust policy: listed issuer, tenant, principal, budget | `demo/scenarios.py::rogue_issuer` |
 | Forged or mis-claimed ID token | signature, issuer, audience, expiry, not-before and required claims are checked against the issuer's clock; algorithm allowlist; claims-to-tenant mapping; ceilings per tenant | `tests/test_issuer.py` |
 | Task root outliving the ID token | the root's expiry is capped at the token's `exp` | `tests/test_issuer.py::test_task_root_never_outlives_the_id_token` |
-| A token meant for another client | `azp` must be this client when present, and a token with several audiences must name it; tokens typed `at+jwt` are refused | `tests/test_issuer.py::test_token_issued_to_another_client_is_refused`, `tests/test_issuer.py::test_access_token_is_refused` |
+| A token meant for another client | `azp` must be this client when present, and a token with several audiences must name it; tokens typed `at+jwt` are refused, but `typ` alone does not separate access tokens typed plain `JWT` | `tests/test_issuer.py::test_token_issued_to_another_client_is_refused`, `tests/test_issuer.py::test_access_token_is_refused` |
 | A claim naming a principal in another namespace | the principal claim may not contain `*` or any trust-prefix delimiter (`:`, `/`, `.`) | `tests/test_issuer.py::test_principal_claim_with_a_delimiter_or_wildcard_is_refused` |
-| Spending past a budget | link caps and the task pool are reserved in one ledger transaction | `demo/scenarios.py::budget_exhaustion` |
+| Spending past a budget | link caps and the task pool are reserved in one ledger transaction (agent-warrant); the scenario shows the caps one request at a time, and concurrent spending is not tested here | `demo/scenarios.py::budget_exhaustion` |
 | Repeating a request | the same nonce from the same holder is refused as already done | `tests/test_executor.py::test_identical_request_is_not_performed_twice` |
 | Delegation outliving a revocation | revoking a root, link, task or tenant stops later requests | `demo/scenarios.py::root_revocation_cascade`, `demo/scenarios.py::mid_chain_revocation`, `tests/test_operator.py` |
 | A copied credential used elsewhere | the target refuses another holder key, another operation, altered arguments, a reuse and an expired credential | `demo/scenarios.py::stolen_credential` |
@@ -48,6 +48,8 @@ Each line names a test that fails if the behaviour is removed.
 - Issuer refusal messages carry the underlying reason, for example a JWKS fetch error. A service in front of the issuer should log them and return a generic refusal.
 - Denial of service: connections are capped at 64 and a frame must arrive within 10 seconds, but a target call has no time limit, so the allowed agent user can hold every slot with slow effects. Frames are capped at 1 MiB.
 - Alert routing fails loud: one unreadable audit row, or an unreadable record of routed alerts, stops automatic response until an operator repairs it ([OPERATIONS.md](OPERATIONS.md)). Delivery is at least once: a crash between an action and its record re-applies the action on the next scan.
+- After the ledger marks an operation issued, a failure returns `outcome_unknown` with the `op_id`, not a refusal. If the failure was writing evidence, the effect may have run with no terminal evidence row.
+- `routed.jsonl`, the record of alerts already acted on, is unsigned local state: whoever can write it as the operator's user can suppress or repeat a response. Delivery is at least once only for events still inside the scanned window.
 - Locks on the alert state and the issuance log are `flock` locks on a local filesystem; a network filesystem shared between hosts is not supported.
 - Prompt injection itself, memory poisoning, code execution inside the agent, and supply-chain compromise of the agent's tooling are not addressed; the design limits what a compromised agent can do, not whether it is compromised.
 - Time: expiry checks use the executor's clock and a 5 second skew allowance in agent-warrant.
