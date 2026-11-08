@@ -5,6 +5,7 @@ sees a secret or a credential."""
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import stat
@@ -172,23 +173,25 @@ class AgentTools:
         """Reads one regular file directly inside the workspace: no path separators, no symlinks, size capped."""
         if not name or "/" in name or "\0" in name or name in (".", ".."):
             raise ToolError(f"no document named {name!r}")
-        directory = os.open(self._state.workspace, os.O_RDONLY | os.O_DIRECTORY)
+        directory = os.open(self._state.workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             try:
-                descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+                if not stat.S_ISREG(os.stat(name, dir_fd=directory, follow_symlinks=False).st_mode):
+                    raise ToolError(f"no document named {name!r}")
+                descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
             except OSError:
                 raise ToolError(f"no document named {name!r}") from None
         finally:
             os.close(directory)
         try:
-            info = os.fstat(descriptor)
-            if not stat.S_ISREG(info.st_mode):
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
                 raise ToolError(f"no document named {name!r}")
-            if info.st_size > MAX_DOCUMENT_BYTES:
-                raise ToolError(f"document {name!r} is over {MAX_DOCUMENT_BYTES} bytes")
-            return os.read(descriptor, MAX_DOCUMENT_BYTES + 1).decode()
+            data = os.read(descriptor, MAX_DOCUMENT_BYTES + 1)
         finally:
             os.close(descriptor)
+        if len(data) > MAX_DOCUMENT_BYTES:
+            raise ToolError(f"document {name!r} is over {MAX_DOCUMENT_BYTES} bytes")
+        return data.decode()
 
     def _log(self, entry: dict[str, Any]) -> None:
         with self._state.call_log.open("a") as handle:
@@ -205,7 +208,7 @@ def reply_to(tools: AgentTools, line: str) -> dict[str, Any] | None:
         return error(None, -32600, "message is too long")
     try:
         message = json.loads(line)
-    except ValueError:
+    except (ValueError, RecursionError):
         return error(None, -32700, "parse error")
     if not isinstance(message, dict):
         return error(None, -32600, "message must be an object")
@@ -249,6 +252,11 @@ def handle_message(tools: AgentTools, message: dict[str, Any]) -> dict[str, Any]
     return reply
 
 
+def text_reader(buffer: Any) -> TextIO:
+    """Decodes the byte stream as UTF-8 with invalid bytes replaced, so bad input becomes a parse error, not a crash."""
+    return io.TextIOWrapper(buffer, encoding="utf-8", errors="replace")
+
+
 def read_line(reader: TextIO) -> str | None:
     """The next line, or an over-long marker without holding more than the limit in memory; None at end of input."""
     line = reader.readline(MAX_LINE_CHARACTERS + 1)
@@ -280,7 +288,7 @@ def main(argv: list[str] | None = None) -> int:
     state = AgentState.load(Path(arguments[0]))
     if state.env_log is not None:
         state.env_log.write_text(json.dumps(sorted(os.environ)))
-    serve(AgentTools(state), sys.stdin, sys.stdout)
+    serve(AgentTools(state), text_reader(sys.stdin.buffer), sys.stdout)
     return 0
 
 
