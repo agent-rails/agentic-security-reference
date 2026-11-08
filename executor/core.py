@@ -84,6 +84,7 @@ class Executor:
             self._evidence.write(
                 stamp=None,
                 trace_id=trace_id,
+                host=None,
                 tool="unknown",
                 resource="unknown",
                 args={},
@@ -103,6 +104,7 @@ class Executor:
             self._evidence.write(
                 stamp=stamp,
                 trace_id=trace_id,
+                host=request.host,
                 tool=request.tool,
                 resource=request.resource,
                 args=request.args,
@@ -143,13 +145,14 @@ class Executor:
         injector = self._injectors.get(request.tool)
         if target is None or injector is None:
             return refuse("no_target", "no-target", stamp)
-        allowed, verdict = Guard(self._policy, MemoryAuditSink(), agent_id=stamp.grant_hash).decide(
+        allowed, verdict = Guard(self._policy, MemoryAuditSink(), agent_id=stamp.actor).decide(
             request.tool, request.args
         )
         if not allowed:
             self._evidence.write(
                 stamp=stamp,
                 trace_id=trace_id,
+                host=request.host,
                 tool=request.tool,
                 resource=request.resource,
                 args=request.args,
@@ -193,6 +196,7 @@ class Executor:
             self._evidence.write(
                 stamp=stamp,
                 trace_id=trace_id,
+                host=request.host,
                 tool=request.tool,
                 resource=request.resource,
                 args=request.args,

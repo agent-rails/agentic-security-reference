@@ -18,14 +18,37 @@ class Stamp:
     task_root: str
     grant_hash: str
     tenant_id: str
+    principal: str
+    actor: str
+    parent_actor: str
+    purpose: str
 
     @classmethod
     def from_chain(cls, chain: ChainVerifyResult) -> Stamp:
-        leaf = chain.links[-1] if chain.links else chain.root
-        return cls(task_root=chain.root.binding(), grant_hash=leaf.binding(), tenant_id=chain.root.tenant_id)
+        """`actor` is the leaf holder's public key, `parent_actor` the key that delegated to it (the task root's
+        issuer when the root's own subject acts), `principal` and `purpose` the signed task root's."""
+        root = chain.root
+        leaf = chain.links[-1] if chain.links else root
+        return cls(
+            task_root=root.binding(),
+            grant_hash=leaf.binding(),
+            tenant_id=root.tenant_id,
+            principal=root.principal,
+            actor=leaf.subject,
+            parent_actor=leaf.issuer,
+            purpose=root.purpose,
+        )
 
     def fields(self) -> dict[str, str]:
-        return {"task_root": self.task_root, "grant_hash": self.grant_hash, "tenant_id": self.tenant_id}
+        return {
+            "task_root": self.task_root,
+            "grant_hash": self.grant_hash,
+            "tenant_id": self.tenant_id,
+            "principal": self.principal,
+            "actor": self.actor,
+            "parent_actor": self.parent_actor,
+            "purpose": self.purpose,
+        }
 
 
 class EvidenceWriter:
@@ -40,6 +63,7 @@ class EvidenceWriter:
         *,
         stamp: Stamp | None,
         trace_id: str,
+        host: str | None,
         tool: str,
         resource: str,
         args: dict[str, Any],
@@ -54,7 +78,7 @@ class EvidenceWriter:
         identity = stamp.fields() if stamp is not None else {}
         self._sink.write(
             build_record(
-                UNVERIFIED if stamp is None else stamp.grant_hash,
+                UNVERIFIED if stamp is None else stamp.actor,
                 tool,
                 {"resource": resource, "args": args},
                 verdict,
@@ -65,6 +89,7 @@ class EvidenceWriter:
                 call_digest=call_digest,
                 outcome=outcome,
                 trace_id=trace_id,
+                host=None if host is None else f"claim:{host}",
                 **identity,
             )
         )
