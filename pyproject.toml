@@ -1,0 +1,34 @@
+[project]
+name = "agentic-security-reference"
+version = "0.1.0"
+description = "Reference architecture and runnable demo for agentic security: task-scoped delegated authority, credential custody, effect budgets, evidence and kill switches."
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "Apache-2.0" }
+authors = [{ name = "voltagebots" }]
+dependencies = [
+    "agent-warrant @ git+https://github.com/agent-rails/agent-warrant@80d091e8258395cde8dad119087f5b1d2fa86ef8",
+    "toolcall-authz @ git+https://github.com/agent-rails/agent-guard@f12a648eae45256b9a393d9271aa1d20094f366f",
+]
+
+[project.urls]
+Repository = "https://github.com/agent-rails/agentic-security-reference"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["executor", "demo"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
