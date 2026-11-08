@@ -15,7 +15,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", required=True, type=Path)
     arguments = parser.parse_args(argv)
     built = build_executor(load_config(arguments.config))
-    server = ExecutorServer(built.executor, built.run_dir, built.agent_uid)
+    server = ExecutorServer(built.executor, built.run_dir, built.agent_uid, built.agent_gid)
     signal.signal(signal.SIGTERM, lambda *_: server.shutdown_from_signal())
     print(f"executor listening on {server.socket_path}", flush=True)
     try:

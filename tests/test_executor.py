@@ -14,6 +14,7 @@ from demo.agents import Agent
 from demo.world import DEPLOY_SCOPE, EXECUTOR_ID, World
 from executor import server as server_module
 from executor.client import send_frame
+from executor.config import load_config
 from executor.credentials import executor_key_id
 from executor.protocol import MAX_FRAME_BYTES, ProtocolError, decode_request, derive_op_id, encode_request
 from executor.server import ExecutorServer, prepare_run_dir
@@ -361,12 +362,13 @@ def test_peer_other_than_the_allowed_user_is_closed_without_a_response(world, al
     assert world.effects("deploy-api") == []
 
 
-def test_separate_user_mode_opens_the_socket_to_the_agent_user_only():
-    world = World(agent_uid=os.geteuid() + 1)
+def test_separate_user_mode_opens_the_socket_to_the_agent_group_only():
+    world = World(agent_uid=os.geteuid() + 1, agent_gid=os.getegid())
     try:
         running = world.start_in_process()
-        assert stat.S_IMODE(os.stat(running.socket_path.parent).st_mode) == 0o711
-        assert stat.S_IMODE(os.stat(running.socket_path).st_mode) == 0o666
+        for path, mode in ((running.socket_path.parent, 0o710), (running.socket_path, 0o660)):
+            info = os.stat(path)
+            assert (stat.S_IMODE(info.st_mode), info.st_gid) == (mode, os.getegid())
         for path in (world.exec_dir / "secrets").iterdir():
             assert stat.S_IMODE(path.stat().st_mode) == 0o600
         agent = Agent("alice")
@@ -381,10 +383,45 @@ def test_separate_user_mode_opens_the_socket_to_the_agent_user_only():
         world.stop()
 
 
-def test_agent_user_must_differ_from_the_executor_user():
-    world = World(agent_uid=os.geteuid())
+@pytest.mark.parametrize(
+    ("agent_uid", "agent_gid", "match"),
+    [
+        (os.geteuid(), os.getegid(), "agent_uid"),
+        (0, os.getegid(), "agent_uid"),
+        (os.geteuid() + 1, None, "agent_gid"),
+        (os.geteuid() + 1, 0, "agent_gid"),
+        (os.geteuid() + 1, max(os.getgroups() + [os.getegid()]) + 12345, "agent_gid"),
+    ],
+)
+def test_separate_user_mode_refuses_an_unsafe_agent_user_or_group(agent_uid, agent_gid, match):
+    world = World(agent_uid=agent_uid, agent_gid=agent_gid)
     try:
-        with pytest.raises(ValueError, match="agent_uid"):
+        with pytest.raises(ValueError, match=match):
             world.start_in_process()
     finally:
         world.stop()
+
+
+def test_run_dir_reached_through_a_symlink_is_refused(tmp_path):
+    base = tmp_path.resolve()
+    (base / "real").mkdir()
+    (base / "link").symlink_to(base / "real")
+    with pytest.raises(ValueError, match="symlink"):
+        prepare_run_dir(base / "link" / "run")
+
+
+def test_config_others_can_write_is_refused(world):
+    os.chmod(world.config_path, 0o666)
+    with pytest.raises(ValueError, match="config"):
+        load_config(world.config_path)
+
+
+def test_config_reached_through_a_symlink_is_refused(world, tmp_path):
+    link = tmp_path / "config.json"
+    link.symlink_to(world.config_path)
+    with pytest.raises((ValueError, OSError)):
+        load_config(link)
+
+
+def test_world_writes_its_config_private_to_the_executor_user(world):
+    assert stat.S_IMODE(world.config_path.stat().st_mode) == 0o600
