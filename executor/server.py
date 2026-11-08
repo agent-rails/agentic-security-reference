@@ -12,6 +12,7 @@ import traceback
 from pathlib import Path
 
 from .core import Executor
+from .peer import check_supported, peer_uid
 from .protocol import ProtocolError, read_frame, write_frame
 
 SOCKET_NAME = "executor.sock"
@@ -19,19 +20,19 @@ FRAME_DEADLINE_SECONDS = 10.0
 MAX_CONNECTIONS = 64
 
 
-def prepare_run_dir(run_dir: Path) -> Path:
-    """The directory holding the socket must be a real directory owned by this user with mode 0700, and no
+def prepare_run_dir(run_dir: Path, mode: int = 0o700) -> Path:
+    """The directory holding the socket must be a real directory owned by this user with `mode`, and no
     directory above it may be owned by another user or writable by others unless it is sticky, so no other user
     can rename or swap it between the check and the bind."""
-    run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    run_dir.mkdir(mode=mode, parents=True, exist_ok=True)
     for ancestor in run_dir.resolve().parents:
         above = os.stat(ancestor)
         shared = above.st_mode & (stat.S_IWGRP | stat.S_IWOTH) and not above.st_mode & stat.S_ISVTX
         if above.st_uid not in (0, os.geteuid()) or shared:
             raise ValueError(f"run_dir has an ancestor owned or writable by another user: {ancestor}")
     info = os.lstat(run_dir)
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
-        raise ValueError(f"run_dir must be a real directory owned by this user with mode 0700: {run_dir}")
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != mode:
+        raise ValueError(f"run_dir must be a real directory owned by this user with mode {mode:04o}: {run_dir}")
     return run_dir
 
 
@@ -51,11 +52,21 @@ class _Handler(socketserver.BaseRequestHandler):
 
 
 class ExecutorServer(socketserver.ThreadingUnixStreamServer):
+    """Serves the executor on a Unix socket and accepts a connection only from one user id, checked against the
+    kernel's peer credentials. With no `agent_uid` that is this user, which gives no custody boundary: an agent
+    running as the executor's user can read its secrets. With `agent_uid` the agent runs as that other user and
+    the directory and socket are opened just enough for it to connect."""
+
     daemon_threads = True
 
-    def __init__(self, executor: Executor, run_dir: Path) -> None:
+    def __init__(self, executor: Executor, run_dir: Path, agent_uid: int | None = None) -> None:
+        check_supported()
+        if agent_uid == os.geteuid():
+            raise ValueError("agent_uid must differ from the executor's user id")
         self.executor = executor
-        self.socket_path = prepare_run_dir(run_dir) / SOCKET_NAME
+        self.allowed_uid = os.geteuid() if agent_uid is None else agent_uid
+        run_mode, socket_mode = (0o700, 0o600) if agent_uid is None else (0o711, 0o666)
+        self.socket_path = prepare_run_dir(run_dir, run_mode) / SOCKET_NAME
         if os.path.lexists(self.socket_path):
             raise ValueError(f"socket path already exists: {self.socket_path}")
         previous = os.umask(0o177)
@@ -63,12 +74,12 @@ class ExecutorServer(socketserver.ThreadingUnixStreamServer):
             super().__init__(str(self.socket_path), _Handler)
         finally:
             os.umask(previous)
-        os.chmod(self.socket_path, 0o600)
+        os.chmod(self.socket_path, socket_mode)
         self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
         self._thread: threading.Thread | None = None
 
     def process_request(self, request: socket.socket, client_address: object) -> None:  # type: ignore[override]
-        if not self._slots.acquire(blocking=False):
+        if peer_uid(request) != self.allowed_uid or not self._slots.acquire(blocking=False):
             self.shutdown_request(request)
             return
         try:

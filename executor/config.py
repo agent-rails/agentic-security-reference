@@ -33,6 +33,7 @@ class Built:
     ledger: TaskLedger
     injectors: dict[str, CredentialInjector]
     run_dir: Path
+    agent_uid: int | None = None
 
     def suspend(self, reason: str, actor: str) -> None:
         next(iter(self.injectors.values())).suspend(reason, actor)
@@ -145,4 +146,13 @@ def build_executor(
         clock=clock,
         reservation_ttl=config["reservation_ttl"],
     )
-    return Built(executor=executor, ledger=executor.ledger, injectors=injectors, run_dir=Path(config["run_dir"]))
+    agent_uid = config.get("agent_uid")
+    if agent_uid is not None and (type(agent_uid) is not int or agent_uid < 0):
+        raise ValueError("agent_uid must be a non-negative integer user id")
+    return Built(
+        executor=executor,
+        ledger=executor.ledger,
+        injectors=injectors,
+        run_dir=Path(config["run_dir"]),
+        agent_uid=agent_uid,
+    )

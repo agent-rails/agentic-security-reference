@@ -94,10 +94,13 @@ class World:
     issuer_key: Ed25519PrivateKey = field(default_factory=generate_keypair)
     secrets: dict[str, bytes] = field(default_factory=dict)
     running: Running | None = None
+    agent_uid: int | None = None
 
     def __post_init__(self) -> None:
-        os.chmod(self.root_dir, 0o700)
+        traverse = 0o700 if self.agent_uid is None else 0o711
+        os.chmod(self.root_dir, traverse)
         self.exec_dir = private_dir(self.root_dir / "exec")
+        os.chmod(self.exec_dir, traverse)
         self.config_path = self.exec_dir / "config.json"
         self.audit_path = self.exec_dir / "audit.jsonl"
         self.ledger_path = self.exec_dir / "ledger.db"
@@ -122,13 +125,14 @@ class World:
         write_executor_key(self.exec_dir / "executor.key", self.executor_key)
         write_private(self.exec_dir / "audit.key", self.audit_key)
         write_private(self.exec_dir / "alert.key", self.alert_key)
-        private_dir(self.exec_dir / "run")
+        os.chmod(private_dir(self.exec_dir / "run"), 0o700 if self.agent_uid is None else 0o711)
         TaskLedger.create(self.ledger_path)
         self.config = self.make_config()
         self.config_path.write_text(json.dumps(self.config, indent=2))
 
     def make_config(self) -> dict[str, Any]:
         return {
+            "agent_uid": self.agent_uid,
             "executor_id": EXECUTOR_ID,
             "run_dir": str(self.exec_dir / "run"),
             "state_dir": str(self.exec_dir / "state"),
@@ -186,7 +190,7 @@ class World:
 
     def start_in_process(self, *, minter: Any = None, targets: Mapping[str, Target] | None = None) -> Running:
         built = build_executor(self.config, self.clock, minter=minter, targets=targets)
-        server = ExecutorServer(built.executor, built.run_dir)
+        server = ExecutorServer(built.executor, built.run_dir, built.agent_uid)
         server.start_in_background()
         self.running = Running(server.socket_path, server=server, built=built)
         return self.running

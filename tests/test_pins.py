@@ -42,3 +42,10 @@ def test_agent_guard_core_does_not_import_agent_warrant():
     )
     result = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
+
+
+def test_ci_runs_the_separate_user_test_as_a_second_os_user():
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    assert "useradd" in workflow
+    assert "ASR_AGENT_USER: asr-agent" in workflow
+    assert "tests/test_separate_user.py" in workflow
