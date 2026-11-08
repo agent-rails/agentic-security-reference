@@ -13,11 +13,11 @@ Sources:
 |---|---|---|---|
 | ASI01 | Agent Goal Hijack | limits what a hijacked agent can do (scope, budget, expiry); flags persona deviations after the fact (`demo/scenarios.py::persona_deviation`) | preventing the hijack |
 | ASI02 | Tool Misuse | scope match, cost cap and guard policy before every effect (`tests/test_executor.py::test_tool_outside_scope_is_refused`) | misuse inside granted scope and budget |
-| ASI03 | Identity & Privilege Abuse | task-scoped authority narrowed per hop; the agent holds no secret (`demo/scenarios.py::budget_exhaustion`) | agent attestation; key custody on the agent side |
+| ASI03 | Identity & Privilege Abuse | task-scoped authority narrowed per hop; the agent holds no secret (`demo/scenarios.py::budget_exhaustion`, `tests/test_enforced_process.py::test_agent_process_holds_no_secret_and_still_gets_its_effect`) | agent attestation; key custody on the agent side |
 | ASI04 | Agentic Supply Chain Vulnerabilities | nothing | all of it |
 | ASI05 | Unexpected Code Execution | nothing; isolated mode is not built | all of it |
 | ASI06 | Memory & Context Poisoning | nothing | all of it |
-| ASI07 | Insecure Inter-Agent Communication | delegation records are signed and hash-chained (`demo/scenarios.py::mid_chain_revocation`) | any transport or messaging between agents |
+| ASI07 | Insecure Inter-Agent Communication | delegation records are signed and hash-chained; agent-warrant verifies them, and rejecting an altered record is not tested here (`demo/scenarios.py::mid_chain_revocation` shows revocation only) | any transport or messaging between agents |
 | ASI08 | Cascading Failures | budgets bound the blast radius; revoking a root stops all descendants (`demo/scenarios.py::root_revocation_cascade`) | failures of dependencies and tools |
 | ASI09 | Human-Agent Trust Exploitation | nothing; `require_human` verdicts are refused, no approval flow is wired | all of it |
 | ASI10 | Rogue Agents | suspend and revoke levers; alert routing (`demo/scenarios.py::kill_levers`, `demo/scenarios.py::alert_stops_live_chain`) | detecting an agent that never passes the executor |

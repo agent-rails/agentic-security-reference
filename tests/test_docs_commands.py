@@ -10,7 +10,8 @@ ROOT = Path(__file__).resolve().parent.parent
 DOCS = [ROOT / "README.md", *sorted((ROOT / "docs").glob("*.md"))]
 FENCE = re.compile(r"^```(?P<info>[^\n]*)\n(?P<body>.*?)^```$", re.MULTILINE | re.DOTALL)
 EXECUTABLE_LANGUAGES = {"sh", "bash", "shell", "python", "py"}
-REFERENCE = re.compile(r"`([\w./-]+\.(?:py|md|yml|toml))(?:::([\w.]+))?`")
+REFERENCE = re.compile(r"`([\w./-]+\.(?:py|md|yml|toml))((?:::[\w.]+)*)`")
+SPAN = re.compile(r"`([^`\n]+)`")
 
 
 def blocks():
@@ -71,7 +72,8 @@ def test_every_file_and_test_the_docs_cite_exists():
     cited = 0
     for path in DOCS:
         for match in REFERENCE.finditer(path.read_text()):
-            file_part, name = match.groups()
+            file_part, names = match.groups()
+            name = names.split("::")[-1] if names else None
             target = ROOT / file_part if "/" in file_part or (ROOT / file_part).exists() else ROOT / "docs" / file_part
             if file_part.startswith("docs/") or file_part in {"pyproject.toml"} or "/" in file_part:
                 target = ROOT / file_part
@@ -82,3 +84,10 @@ def test_every_file_and_test_the_docs_cite_exists():
                 last = name.split(".")[-1]
                 assert re.search(rf"(def|class) {re.escape(last)}\b", source), f"{path.name}: {file_part}::{name}"
     assert cited > 20
+
+
+def test_every_test_citation_has_the_checked_form():
+    for path in DOCS:
+        for span in SPAN.findall(path.read_text()):
+            if ".py::" in span:
+                assert REFERENCE.fullmatch(f"`{span}`"), f"{path.name}: citation {span!r} is not checked"
