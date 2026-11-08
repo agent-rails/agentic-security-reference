@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import sys
+import threading
 import traceback
 import uuid
 from collections.abc import Callable, Mapping
@@ -67,6 +68,8 @@ class Executor:
         self._evidence = evidence
         self._clock = clock
         self._reservation_ttl = reservation_ttl
+        self._in_flight: set[str] = set()
+        self._in_flight_lock = threading.Lock()
 
     def handle(self, frame: bytes) -> dict[str, Any]:
         try:
@@ -167,93 +170,119 @@ class Executor:
         if injector.suspended:
             return refuse("suspended", "suspended", stamp)
 
+        op_id = derive_op_id(root.tenant_id, root.task_id, leaf.binding(), digest)
+        with self._in_flight_lock:
+            if op_id in self._in_flight:
+                return refuse("in_progress", "replay", stamp)
+            self._in_flight.add(op_id)
         try:
-            self._ledger.open_task(TaskRootResult(valid=True, reason="ok", root=root, checked_at=now), now)
-            operation = Operation(
-                op_id=derive_op_id(root.tenant_id, root.task_id, leaf.binding(), digest),
-                tenant_id=root.tenant_id,
-                task_id=root.task_id,
-                leaf_binding=leaf.binding(),
-                tool=request.tool,
-                resource=request.resource,
-                args_digest=args_digest(request.args),
-                cost=cost,
-                verdict_allowed=True,
-                expires_at=min(
-                    now + self._reservation_ttl, root.expires_at, *(link.expires_at for link in chain.links)
-                ),
-            )
-            reservation = self._ledger.reserve(operation, chain.links, now)
-        except Refused as err:
-            return refuse("reservation_refused", "ledger", stamp, str(err))
-        except LedgerUnavailable as err:
-            return refuse("ledger_unavailable", "ledger-unavailable", stamp, str(err))
+            try:
+                self._ledger.open_task(TaskRootResult(valid=True, reason="ok", root=root, checked_at=now), now)
+                operation = Operation(
+                    op_id=op_id,
+                    tenant_id=root.tenant_id,
+                    task_id=root.task_id,
+                    leaf_binding=leaf.binding(),
+                    tool=request.tool,
+                    resource=request.resource,
+                    args_digest=args_digest(request.args),
+                    cost=cost,
+                    verdict_allowed=True,
+                    expires_at=min(
+                        now + self._reservation_ttl, root.expires_at, *(link.expires_at for link in chain.links)
+                    ),
+                )
+                reservation = self._ledger.reserve(operation, chain.links, now)
+            except Refused as err:
+                return refuse("reservation_refused", "ledger", stamp, str(err))
+            except LedgerUnavailable as err:
+                return refuse("ledger_unavailable", "ledger-unavailable", stamp, str(err))
 
-        call_digest = hashlib.sha256(operation.digest().encode()).hexdigest()
-        released = Verdict(Decision.ALLOW, verdict.reason, rule_id=verdict.rule_id)
+            call_digest = hashlib.sha256(operation.digest().encode()).hexdigest()
+            released = Verdict(Decision.ALLOW, verdict.reason, rule_id=verdict.rule_id)
 
-        def record(event: str, outcome: str, executed: bool, error: str | None = None) -> None:
-            self._evidence.write(
-                stamp=stamp,
-                trace_id=trace_id,
-                host=request.host,
-                tool=request.tool,
-                resource=request.resource,
+            def record(event: str, outcome: str, executed: bool, error: str | None = None) -> None:
+                self._evidence.write(
+                    stamp=stamp,
+                    trace_id=trace_id,
+                    host=request.host,
+                    tool=request.tool,
+                    resource=request.resource,
+                    args=request.args,
+                    verdict=released,
+                    executed=executed,
+                    event=event,
+                    outcome=outcome,
+                    call_id=call_id,
+                    call_digest=call_digest,
+                    error=error,
+                )
+
+            def finish(
+                status: str, reason: str, outcome: str, executed: bool, error: str | None = None, state: str = ""
+            ) -> dict[str, Any]:
+                record("terminal", outcome, executed, error)
+                return _response(
+                    status, reason, op_id=operation.op_id, trace_id=trace_id, state=state or reservation.state
+                )
+
+            try:
+                if reservation.state == "reserved":
+                    reservation = self._ledger.mark_issued(operation.tenant_id, operation.task_id, operation.op_id, now)
+                elif reservation.state != "issued":
+                    return refuse(f"already_{reservation.state}", "replay", stamp)
+            except (Refused, LedgerUnavailable) as err:
+                return refuse("reservation_refused", "ledger", stamp, str(err))
+
+            record("release", "pending", False)
+            injected = injector.inject(operation, reservation)
+            if isinstance(injected, Refusal):
+                if injected.reason in ("already_issued", "mint_failed"):
+                    return self._unknown(operation, now, finish, False, injected.reason)
+                record("terminal", "not_dispatched", False, injected.reason)
+                return _response("refused", f"injector_{injected.reason}", op_id=operation.op_id, trace_id=trace_id)
+
+            call = EffectCall(
+                credential=injected.credential,
+                proof=sign_effect_proof(self._executor_key, injected.credential),
+                operation=operation.signable_fields(),
                 args=request.args,
-                verdict=released,
-                executed=executed,
-                event=event,
-                outcome=outcome,
-                call_id=call_id,
-                call_digest=call_digest,
-                error=error,
             )
+            try:
+                result = target.perform(call)
+            except TargetRefused as err:
+                return self._unknown(operation, now, finish, False, "target_refused", str(err))
+            except Exception as err:
+                return self._unknown(operation, now, finish, True, "target_error", f"{type(err).__name__}: {err}")
+            try:
+                reservation = self._ledger.mark_done(operation.tenant_id, operation.task_id, operation.op_id, now)
+            except (Refused, LedgerUnavailable) as err:
+                return finish("outcome_unknown", "effect_done_ledger_not_updated", "unknown", True, str(err))
+            record("terminal", "returned", True)
+            return _response(
+                "done", "ok", op_id=operation.op_id, trace_id=trace_id, state=reservation.state, result=result
+            )
+        finally:
+            with self._in_flight_lock:
+                self._in_flight.discard(op_id)
 
-        def finish(status: str, reason: str, outcome: str, error: str | None = None) -> dict[str, Any]:
-            record("terminal", outcome, True, error)
-            return _response(status, reason, op_id=operation.op_id, trace_id=trace_id, state=reservation.state)
-
+    def _unknown(
+        self,
+        operation: Operation,
+        now: int,
+        finish: Callable[..., dict[str, Any]],
+        executed: bool,
+        reason: str,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        state = ""
         try:
-            if reservation.state == "reserved":
-                reservation = self._ledger.mark_issued(operation.tenant_id, operation.task_id, operation.op_id, now)
-            elif reservation.state != "issued":
-                return refuse(f"already_{reservation.state}", "replay", stamp)
-        except (Refused, LedgerUnavailable) as err:
-            return refuse("reservation_refused", "ledger", stamp, str(err))
-
-        record("release", "pending", True)
-        injected = injector.inject(operation, reservation)
-        if isinstance(injected, Refusal):
-            if injected.reason in ("already_issued", "mint_failed"):
-                return self._unknown(operation, now, finish, injected.reason)
-            record("terminal", "not_dispatched", False, injected.reason)
-            return _response("refused", f"injector_{injected.reason}", op_id=operation.op_id, trace_id=trace_id)
-
-        call = EffectCall(
-            credential=injected.credential,
-            proof=sign_effect_proof(self._executor_key, injected.credential),
-            operation=operation.signable_fields(),
-            args=request.args,
-        )
-        try:
-            result = target.perform(call)
-        except TargetRefused as err:
-            return self._unknown(operation, now, finish, "target_refused", str(err))
-        except Exception as err:
-            return self._unknown(operation, now, finish, "target_error", f"{type(err).__name__}: {err}")
-        try:
-            reservation = self._ledger.mark_done(operation.tenant_id, operation.task_id, operation.op_id, now)
-        except (Refused, LedgerUnavailable) as err:
-            return finish("outcome_unknown", "effect_done_ledger_not_updated", "unknown", str(err))
-        record("terminal", "returned", True)
-        return _response("done", "ok", op_id=operation.op_id, trace_id=trace_id, state=reservation.state, result=result)
-
-    def _unknown(self, operation: Operation, now: int, finish: Callable, reason: str, error: str | None = None) -> dict:
-        try:
-            self._ledger.mark_outcome_unknown(operation.tenant_id, operation.task_id, operation.op_id, now)
+            state = self._ledger.mark_outcome_unknown(
+                operation.tenant_id, operation.task_id, operation.op_id, now
+            ).state
         except (Refused, LedgerUnavailable) as err:
             error = f"{error or reason}; ledger: {err}"
-        return finish("outcome_unknown", reason, "unknown", error or reason)
+        return finish("outcome_unknown", reason, "unknown", executed, error or reason, state)
 
 
 def _response(status: str, reason: str, **extra: Any) -> dict[str, Any]:

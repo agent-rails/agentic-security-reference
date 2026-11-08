@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
+import time
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,7 @@ def send_frame(socket_path: Path, frame: bytes, timeout: float = 30.0) -> dict[s
         connection.settimeout(timeout)
         connection.connect(str(socket_path))
         write_frame(connection, frame)
-        return json.loads(read_frame(connection))
+        return json.loads(read_frame(connection, time.monotonic() + timeout))
 
 
 def send_request(socket_path: Path, request: Request, timeout: float = 30.0) -> dict[str, Any]:

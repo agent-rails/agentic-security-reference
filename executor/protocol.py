@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import socket
 import struct
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -133,12 +134,13 @@ def encode_request(request: Request) -> bytes:
     return canonicalize(body)
 
 
-def read_frame(connection: socket.socket) -> bytes:
-    header = _read_exactly(connection, HEADER.size)
+def read_frame(connection: socket.socket, deadline: float) -> bytes:
+    """Reads one frame, which must arrive in full before `deadline` on the monotonic clock."""
+    header = _read_exactly(connection, HEADER.size, deadline)
     (length,) = HEADER.unpack(header)
     if length > MAX_FRAME_BYTES:
         raise ProtocolError(f"frame of {length} bytes is over the {MAX_FRAME_BYTES} byte limit")
-    return _read_exactly(connection, length)
+    return _read_exactly(connection, length, deadline)
 
 
 def write_frame(connection: socket.socket, payload: bytes) -> None:
@@ -147,10 +149,14 @@ def write_frame(connection: socket.socket, payload: bytes) -> None:
     connection.sendall(HEADER.pack(len(payload)) + payload)
 
 
-def _read_exactly(connection: socket.socket, count: int) -> bytes:
+def _read_exactly(connection: socket.socket, count: int, deadline: float) -> bytes:
     chunks: list[bytes] = []
     remaining = count
     while remaining:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise ProtocolError("frame did not arrive before the deadline")
+        connection.settimeout(left)
         chunk = connection.recv(remaining)
         if not chunk:
             raise ProtocolError("connection closed mid-frame")
