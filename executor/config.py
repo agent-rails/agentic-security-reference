@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ class Built:
     injectors: dict[str, CredentialInjector]
     run_dir: Path
     agent_uid: int | None = None
+    agent_gid: int | None = None
 
     def suspend(self, reason: str, actor: str) -> None:
         next(iter(self.injectors.values())).suspend(reason, actor)
@@ -47,7 +49,19 @@ class Built:
 
 
 def load_config(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text())
+    """The configuration decides who is trusted, so it must be a regular file owned by this user that no other
+    user can write."""
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            raise ValueError(f"config must be a regular file owned by this user and not writable by others: {path}")
+        config: dict[str, Any] = json.loads(handle.read())
+    return config
 
 
 def build_trust_policy(issuers: Mapping[str, Any]) -> tuple[PinnedResolver, IssuerTrustPolicy]:
@@ -147,12 +161,15 @@ def build_executor(
         reservation_ttl=config["reservation_ttl"],
     )
     agent_uid = config.get("agent_uid")
-    if agent_uid is not None and (type(agent_uid) is not int or agent_uid < 0):
-        raise ValueError("agent_uid must be a non-negative integer user id")
+    agent_gid = config.get("agent_gid")
+    for name, value in (("agent_uid", agent_uid), ("agent_gid", agent_gid)):
+        if value is not None and (type(value) is not int or value < 0):
+            raise ValueError(f"{name} must be a non-negative integer id")
     return Built(
         executor=executor,
         ledger=executor.ledger,
         injectors=injectors,
         run_dir=Path(config["run_dir"]),
         agent_uid=agent_uid,
+        agent_gid=agent_gid,
     )

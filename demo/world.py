@@ -90,11 +90,12 @@ class World:
     configuration, and helpers that build agents and requests."""
 
     clock: Callable[[], float] = field(default_factory=FakeClock)
-    root_dir: Path = field(default_factory=lambda: Path(tempfile.mkdtemp(prefix="asr-")))
+    root_dir: Path = field(default_factory=lambda: Path(tempfile.mkdtemp(prefix="asr-")).resolve())
     issuer_key: Ed25519PrivateKey = field(default_factory=generate_keypair)
     secrets: dict[str, bytes] = field(default_factory=dict)
     running: Running | None = None
     agent_uid: int | None = None
+    agent_gid: int | None = None
 
     def __post_init__(self) -> None:
         traverse = 0o700 if self.agent_uid is None else 0o711
@@ -125,14 +126,16 @@ class World:
         write_executor_key(self.exec_dir / "executor.key", self.executor_key)
         write_private(self.exec_dir / "audit.key", self.audit_key)
         write_private(self.exec_dir / "alert.key", self.alert_key)
-        os.chmod(private_dir(self.exec_dir / "run"), 0o700 if self.agent_uid is None else 0o711)
+        if self.agent_uid is None:
+            private_dir(self.exec_dir / "run")
         TaskLedger.create(self.ledger_path)
         self.config = self.make_config()
-        self.config_path.write_text(json.dumps(self.config, indent=2))
+        write_private(self.config_path, json.dumps(self.config, indent=2).encode())
 
     def make_config(self) -> dict[str, Any]:
         return {
             "agent_uid": self.agent_uid,
+            "agent_gid": self.agent_gid,
             "executor_id": EXECUTOR_ID,
             "run_dir": str(self.exec_dir / "run"),
             "state_dir": str(self.exec_dir / "state"),
@@ -190,7 +193,7 @@ class World:
 
     def start_in_process(self, *, minter: Any = None, targets: Mapping[str, Target] | None = None) -> Running:
         built = build_executor(self.config, self.clock, minter=minter, targets=targets)
-        server = ExecutorServer(built.executor, built.run_dir, built.agent_uid)
+        server = ExecutorServer(built.executor, built.run_dir, built.agent_uid, built.agent_gid)
         server.start_in_background()
         self.running = Running(server.socket_path, server=server, built=built)
         return self.running
