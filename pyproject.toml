@@ -7,6 +7,7 @@ requires-python = ">=3.13"
 license = { text = "Apache-2.0" }
 authors = [{ name = "voltagebots" }]
 dependencies = [
+    "PyJWT[crypto]==2.15.1",
     "agent-warrant @ git+https://github.com/agent-rails/agent-warrant@e2b4e24662cb005999382029904cfee4f9d3769a",
     "toolcall-authz @ git+https://github.com/agent-rails/agent-guard@f12a648eae45256b9a393d9271aa1d20094f366f",
 ]
@@ -22,7 +23,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["executor", "demo"]
+packages = ["executor", "issuer", "demo"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -36,4 +37,4 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.mypy]
 python_version = "3.13"
 strict = true
-files = ["executor"]
+files = ["executor", "issuer"]
