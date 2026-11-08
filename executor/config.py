@@ -103,9 +103,12 @@ def build_executor(
     *,
     minter: Any = None,
     targets: Mapping[str, Target] | None = None,
+    target_wrapper: Callable[[Target], Target] | None = None,
+    ledger_wrapper: Callable[[TaskLedger], TaskLedger] | None = None,
 ) -> Built:
     """Wire an Executor from a configuration. `minter` and `targets` replace the defaults (an HMAC minter and
-    recording fake targets built from the config) so a test can inject a fault or inspect a target."""
+    recording fake targets built from the config); `target_wrapper` and `ledger_wrapper` wrap the built ones. They
+    exist so a scenario can inject a fault or capture traffic at the seams; production wiring passes none."""
     secrets = FileSecretStore(Path(config["secrets_dir"]))
     key = load_executor_key(Path(config["executor_key_file"]))
     key_id = executor_key_id(key)
@@ -116,9 +119,11 @@ def build_executor(
     built_targets: dict[str, Target] = {}
     for entry in config["targets"]:
         log_path = Path(entry["log_path"]) if "log_path" in entry else None
-        target = RecordingTarget(
+        target: Target = RecordingTarget(
             entry["name"], entry["audience"], secrets.get(entry["secret"]), key_id, entry["tools"], clock, log_path
         )
+        if target_wrapper is not None:
+            target = target_wrapper(target)
         for tool in entry["tools"]:
             secret_names[tool] = entry["secret"]
             audiences[tool] = entry["audience"]
@@ -146,11 +151,12 @@ def build_executor(
     audit_path.parent.mkdir(parents=True, exist_ok=True)
     os.close(os.open(audit_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600))
     audit_key = load_key_file(config["audit_key_file"], "audit key", AUDIT_KEY_MIN_BYTES)
+    ledger = TaskLedger.open(config["ledger_path"])
     executor = Executor(
         executor_id=config["executor_id"],
         resolver=resolver,
         trust_policy=trust_policy,
-        ledger=TaskLedger.open(config["ledger_path"]),
+        ledger=ledger_wrapper(ledger) if ledger_wrapper is not None else ledger,
         policy=build_policy(config["policy"]),
         costs=costs,
         injectors=injectors,
