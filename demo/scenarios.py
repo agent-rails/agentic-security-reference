@@ -1,8 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
+
+from agent_warrant.identity import generate_keypair
+
+from executor.credentials import sign_effect_proof
+from executor.protocol import args_digest
+from executor.targets import EffectCall, Target, TargetRefused
 
 from .agents import Agent
+from .faults import CapturingTarget
 from .story import Story
 from .world import DEPLOY_SCOPE, PRINCIPAL, TENANT
 
@@ -107,9 +115,82 @@ def mid_chain_revocation(story: Story) -> None:
         story.expect("effects performed", len(world.effects("deploy-api")), 2)
 
 
+def stolen_credential(story: Story) -> None:
+    """The Binance pattern: a credential is copied and presented elsewhere. The target refuses it."""
+    captured: list[CapturingTarget] = []
+
+    def capture(target: Target) -> Target:
+        wrapped = CapturingTarget(target)
+        captured.append(wrapped)
+        return wrapped
+
+    with story.world() as world:
+        world.start_in_process(target_wrapper=capture)
+        signer = next(target for target in captured if "signer.withdraw" in target.tools)
+        trader = story.name(Agent("trader"), "treasury-bot")
+        world.root_for(
+            trader, scope={"tools": ["signer.withdraw"], "resources": ["wallet/*"], "max_cost_per_call": 100}
+        )
+        response = world.send(trader, "signer.withdraw", "wallet/hot-1", {"amount": 10}, "w1")
+        story.outcome("legitimate withdrawal of 10", response, "done")
+        call = signer.calls[0]
+        story.say("an attacker now holds the credential and the call that carried it")
+        attacker_key = generate_keypair()
+
+        def attempt(label: str, offered: EffectCall, reason: str) -> None:
+            try:
+                signer.inner.perform(offered)
+            except TargetRefused as err:
+                story.expect(label, str(err), reason)
+            else:
+                story.expect(label, "accepted", reason)
+
+        forged = replace(call, proof=sign_effect_proof(attacker_key, call.credential))
+        attempt("credential signed with the attacker's own key", forged, "holder proof invalid")
+        greedy_args = {"amount": 1000}
+        attempt(
+            "captured call with larger arguments",
+            replace(call, args=greedy_args),
+            "arguments differ from the operation",
+        )
+        greedy_operation = {**call.operation, "cost": 1000, "args_digest": args_digest(greedy_args)}
+        attempt(
+            "captured call with a rewritten operation",
+            replace(call, operation=greedy_operation, args=greedy_args),
+            "credential was issued for a different operation",
+        )
+        attempt("captured call replayed unchanged", call, "credential already used")
+        world.clock.advance(31)
+        attempt("captured call after the credential expired", call, "credential expired")
+        story.expect("withdrawals performed", [e["args"] for e in world.effects("signer")], [{"amount": 10}])
+
+
+def rogue_issuer(story: Story) -> None:
+    """A validly signed task root is not enough: the executor's trust policy must list the issuer and its claims."""
+    with story.world() as world:
+        world.start_in_process()
+        rogue_key = generate_keypair()
+        cases = [
+            ("unlisted issuer", {"issuer_key": rogue_key, "issuer": "rogue.example"}, "not in the trust policy"),
+            ("listed issuer name, wrong key", {"issuer_key": rogue_key}, "invalid issuer signature"),
+            ("tenant the issuer may not assert", {"tenant": "tenant-b"}, "may not assert tenant"),
+            ("principal the issuer may not assert", {"principal": "user:mallory"}, "may not assert principal"),
+            ("budget above the issuer's allowance", {"budget": 5000}, "exceeds issuer allowance"),
+        ]
+        for label, options, reason in cases:
+            agent = Agent("rogue")
+            world.root_for(agent, **options)
+            response = world.send(agent, *DEPLOY, "n1")
+            story.outcome(label, response, "refused", "chain_invalid")
+            story.expect(f"{label}: reason", reason in response["detail"], True)
+        story.expect("effects performed", len(world.effects("deploy-api")), 0)
+
+
 SCENARIOS: list[tuple[int, str, Callable[[Story], None]]] = [
     (1, "happy path through one delegation hop", happy_path),
     (2, "budget exhaustion across hops", budget_exhaustion),
     (3, "root revocation cascades to every descendant", root_revocation_cascade),
     (4, "mid-chain revocation stops only that subtree", mid_chain_revocation),
+    (5, "a stolen credential fails at the target", stolen_credential),
+    (6, "a rogue issuer is refused by the trust policy", rogue_issuer),
 ]
