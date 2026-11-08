@@ -8,13 +8,14 @@ from typing import Any, Protocol
 import jwt
 from agent_warrant.scope import scope_narrows, validate_scope
 from agent_warrant.task_root import MAX_TTL, TaskRoot, issue_task_root
+from agent_warrant.trust import PREFIX_DELIMITERS
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 SAFE_ALGORITHMS = frozenset({"RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "PS256", "EdDSA"})
 REQUIRED_CLAIMS = ("exp", "iss", "aud", "sub")
 MAX_LEEWAY_SECONDS = 60
 ACCESS_TOKEN_TYPES = frozenset({"at+jwt", "application/at+jwt"})
-PRINCIPAL_FORBIDDEN = frozenset(":*")
+PRINCIPAL_FORBIDDEN = frozenset(PREFIX_DELIMITERS) | {"*"}
 
 
 class IssuanceRefused(Exception):
@@ -114,8 +115,9 @@ class TenantRule:
 class OidcConfig:
     """`issuer_url` and `audience` must equal the token's `iss` and `aud`; `audience` is this issuer's client id.
     The principal is `principal_prefix + claims[principal_claim]`; the prefix ends in ':' and the claim value may
-    not contain ':' or '*', so a token cannot name a principal in another namespace. An `email` principal claim is
-    used only when `email_verified` is true. The tenant is `tenant_map[claims[tenant_claim]]`; a tenant claim not
+    not contain '*' or any delimiter the executor's trust policy splits prefixes on (':', '/', '.'), so a token
+    cannot name a principal in another namespace. The principal claim must therefore be a stable opaque id such as
+    `sub` or `oid`; an email address is refused. The tenant is `tenant_map[claims[tenant_claim]]`; a tenant claim not
     in the map is refused. `tenants` maps a tenant id to its `TenantRule`."""
 
     issuer_url: str
@@ -160,8 +162,11 @@ class OidcTaskRootIssuer:
     produces the ID token; the executor's trust policy lists this issuer, not the provider.
 
     One clock decides time: `exp`, `nbf` and `iat` are checked against the issuer's clock, and a task root never
-    outlives the ID token it came from. Access tokens (`typ` at+jwt) are refused, and a token whose authorized
-    party (`azp`) is another client is refused; a token with several audiences must name this client as `azp`.
+    outlives the ID token it came from. The guard against tokens meant for someone else is the audience: `aud`
+    must include this client, a token whose authorized party (`azp`) is another client is refused, and a token
+    with several audiences must name this client as `azp`. Tokens typed as access tokens (`typ` at+jwt, with any
+    media-type parameters) are also refused, but most providers type their access tokens plain "JWT", so `typ`
+    alone does not tell them apart.
 
     Not defended: the caller chooses the task root's subject key, and an ID token can be exchanged for several
     task roots until it expires. Whoever holds a valid ID token, including a thief, can mint roots bound to a key
@@ -184,7 +189,7 @@ class OidcTaskRootIssuer:
     def _claims(self, id_token: str, now: int) -> dict[str, Any]:
         try:
             typ = jwt.get_unverified_header(id_token).get("typ")
-            if isinstance(typ, str) and typ.lower() in ACCESS_TOKEN_TYPES:
+            if isinstance(typ, str) and typ.split(";")[0].strip().lower() in ACCESS_TOKEN_TYPES:
                 raise IssuanceRefused("an access token is not an ID token")
             key = self._jwks.signing_key(id_token)
             claims: dict[str, Any] = jwt.decode(
@@ -233,9 +238,7 @@ class OidcTaskRootIssuer:
         if not isinstance(value, str) or not value:
             raise IssuanceRefused("principal claim is missing")
         if PRINCIPAL_FORBIDDEN & set(value):
-            raise IssuanceRefused("principal claim may not contain ':' or '*'")
-        if self._config.principal_claim == "email" and claims.get("email_verified") is not True:
-            raise IssuanceRefused("email is a principal only when email_verified is true")
+            raise IssuanceRefused(f"principal claim may not contain any of {''.join(sorted(PRINCIPAL_FORBIDDEN))}")
         return self._config.principal_prefix + value
 
     def issue(self, id_token: str, request: TaskRootRequest) -> TaskRoot:

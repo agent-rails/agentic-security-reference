@@ -226,7 +226,9 @@ def test_token_times_are_checked_against_the_issuer_clock_not_wall_time(idp_key,
         later.issue(token(idp_key), request())
 
 
-@pytest.mark.parametrize("typ", ["at+jwt", "AT+JWT", "application/at+jwt"])
+@pytest.mark.parametrize(
+    "typ", ["at+jwt", "AT+JWT", "application/at+jwt", " at+jwt", "at+jwt ", "at+jwt;v=1", "application/at+jwt; q=1"]
+)
 def test_access_token_is_refused(issuer, idp_key, typ):
     with pytest.raises(IssuanceRefused, match="access token"):
         issuer.issue(token(idp_key, headers={"typ": typ}), request())
@@ -262,21 +264,26 @@ def test_config_refuses_a_principal_prefix_without_a_delimiter(prefix):
         make_config(principal_prefix=prefix)
 
 
-@pytest.mark.parametrize("subject", ["alice:admin", "*", "svc:deployer"])
+@pytest.mark.parametrize("subject", ["alice:admin", "*", "svc:deployer", "acme/admin", "acme.admin"])
 def test_principal_claim_with_a_delimiter_or_wildcard_is_refused(issuer, idp_key, subject):
     with pytest.raises(IssuanceRefused, match="principal"):
         issuer.issue(token(idp_key, sub=subject), request())
 
 
-def test_unverified_email_is_never_a_principal(idp_key, issuer_key):
+def test_principal_claim_must_name_a_key_trust_policy_cannot_split():
+    from agent_warrant.trust import PREFIX_DELIMITERS
+
+    from issuer.oidc import PRINCIPAL_FORBIDDEN
+
+    assert set(PREFIX_DELIMITERS) | {"*"} <= PRINCIPAL_FORBIDDEN
+
+
+def test_email_cannot_be_a_principal_even_when_verified(idp_key, issuer_key):
     by_email = OidcTaskRootIssuer(
         make_config(principal_claim="email"), StaticJwks(jwks_for(idp_key)), issuer_key, ISSUER_ID, lambda: NOW
     )
-    for verified in (False, None, "true"):
-        with pytest.raises(IssuanceRefused, match="email_verified"):
-            by_email.issue(token(idp_key, email="ceo@acme.example", email_verified=verified), request())
-    root = by_email.issue(token(idp_key, email="ceo@acme.example", email_verified=True), request())
-    assert root.principal == "user:ceo@acme.example"
+    with pytest.raises(IssuanceRefused, match="principal"):
+        by_email.issue(token(idp_key, email="ceo@acme.example", email_verified=True), request())
 
 
 @pytest.mark.parametrize(
