@@ -235,6 +235,7 @@ class Executor:
             except (Refused, LedgerUnavailable) as err:
                 return refuse("reservation_refused", "ledger", stamp, str(err))
 
+            called = False
             try:
                 record("release", "pending", False)
                 injected = injector.inject(cast(OperationLike, operation), cast(ReservationLike, reservation))
@@ -250,6 +251,7 @@ class Executor:
                     operation=operation.signable_fields(),
                     args=request.args,
                 )
+                called = True
                 try:
                     result = target.perform(call)
                 except TargetRefused as err:
@@ -265,7 +267,12 @@ class Executor:
                     "done", "ok", op_id=operation.op_id, trace_id=trace_id, state=reservation.state, result=result
                 )
             except Exception:
+                print(f"failure after issue: op_id={operation.op_id} trace_id={trace_id}", file=sys.stderr)
                 traceback.print_exc(file=sys.stderr)
+                try:
+                    record("terminal", "unknown", called, "internal_error_after_issue")
+                except Exception:
+                    traceback.print_exc(file=sys.stderr)
                 return _response(
                     "outcome_unknown", "internal_error_after_issue", op_id=operation.op_id, trace_id=trace_id
                 )
