@@ -1,9 +1,10 @@
+import os
 from datetime import UTC, datetime
 
 import pytest
 
 from demo.agents import Agent
-from executor.operator import Operator
+from executor.operator import AuditIntegrityError, Operator
 
 DEPLOY = ("deploy.service", "env/staging/api", {"image": "api:1"})
 
@@ -82,4 +83,52 @@ def test_tampered_audit_rows_are_not_trusted_by_the_detector(world, running, ali
         "\n".join(lines[:-2] + [line.replace("deploy.service", "deploy.rollback") for line in lines[-2:]]) + "\n"
     )
     assert "deploy.rollback" in world.audit_path.read_text()
+    operator = world.operator()
+    with pytest.raises(AuditIntegrityError, match="unverified"):
+        operator.route_alerts(boundary)
+    assert operator.suspended is False
+
+
+def deviate(world, alice):
+    for nonce in ("b1", "b2", "b3"):
+        assert world.send(alice, *DEPLOY, nonce)["status"] == "done"
+    boundary = datetime.now(UTC)
+    assert world.send(alice, "deploy.rollback", "env/staging/api", {}, "x1")["status"] == "done"
+    return boundary
+
+
+def test_rescanning_the_same_log_after_resume_does_not_suspend_again(world, running, alice):
+    boundary = deviate(world, alice)
+    operator = world.operator()
+    assert [outcome.applied for outcome in operator.route_alerts(boundary)] == [True]
+    operator.resume("operator:oncall")
+    assert operator.route_alerts(boundary) == []
     assert world.operator().route_alerts(boundary) == []
+    assert operator.suspended is False
+
+
+def test_rescanning_after_the_replay_window_does_not_act_again(world, running, alice):
+    boundary = deviate(world, alice)
+    operator = world.operator()
+    operator.route_alerts(boundary)
+    operator.resume("operator:oncall")
+    world.clock.advance(world.config["alert_max_age"] + 60)
+    assert world.operator().route_alerts(boundary) == []
+    assert operator.suspended is False
+
+
+def test_a_new_deviation_after_a_rescan_still_acts(world, running, alice):
+    boundary = deviate(world, alice)
+    operator = world.operator()
+    operator.route_alerts(boundary)
+    operator.resume("operator:oncall")
+    assert world.send(alice, "deploy.service", "env/staging/web", {}, "x2")["status"] == "done"
+    assert [outcome.action for outcome in operator.route_alerts(boundary)] == ["revoke_task"]
+
+
+def test_operator_refuses_an_alert_state_dir_others_can_reach(world):
+    state = world.exec_dir / "alert-state"
+    state.mkdir(mode=0o700)
+    os.chmod(state, 0o770)
+    with pytest.raises(ValueError, match="alert_state_dir"):
+        world.operator()

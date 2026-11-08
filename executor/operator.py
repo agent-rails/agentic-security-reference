@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import dataclasses
+import hashlib
+import json
+import os
+import stat
 import time
 from collections.abc import Callable, Mapping
 from datetime import datetime
@@ -7,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_guard.alert_sink import AlertOutcome, AlertSink, sign_alert
-from agent_guard.detect import DetectConfig, detect_file
+from agent_guard.detect import Alert, DetectConfig, detect_file
 from agent_guard.keyfile import load_key_file
 from agent_warrant.ledger import TaskLedger
 from agentguard_identity.credentials import CredentialInjector, JsonlIssuanceStore
@@ -16,6 +21,17 @@ from .credentials import EmptySecretStore
 
 WRITER_ID = "detector"
 ALERT_KEY_MIN_BYTES = 32
+CURSOR_NAME = "routed-until"
+
+
+def alert_id(alert: Alert) -> str:
+    """The same detected event always gets the same id, so the sink refuses it when a later scan finds it again."""
+    body = json.dumps(dataclasses.asdict(alert), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(body.encode()).hexdigest()[:32]
+
+
+class AuditIntegrityError(Exception):
+    """The audit log has rows that fail verification or parsing, so no alert from it is acted on."""
 
 
 class _NoMinter:
@@ -39,7 +55,10 @@ class Operator:
     """The trusted side that stops things. It shares the executor's ledger file and suspension directory and
     holds no secret: its injector has an empty secret store. Kill levers: `suspend` is the effect stop (new
     credentials are refused), `revoke_*` is the authority stop (chains stop verifying). `route_alerts` runs the
-    detector over the signed audit log and applies the configured response to each alert."""
+    detector over the signed audit log and applies the configured response to each alert.
+
+    The alert key signs and checks alerts inside this process only; it protects alerts that come from a separate
+    detector writing to the same sink, not alerts routed here."""
 
     def __init__(self, config: Mapping[str, Any], clock: Callable[[], float] = time.time) -> None:
         self._clock = clock
@@ -69,6 +88,12 @@ class Operator:
             clock=clock,
             max_age=config["alert_max_age"],
         )
+        self._alert_state_dir = Path(config["alert_state_dir"])
+        info = os.lstat(self._alert_state_dir)
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
+            raise ValueError(
+                f"alert_state_dir must be owned by this user and closed to others: {self._alert_state_dir}"
+            )
 
     @property
     def suspended(self) -> bool:
@@ -91,11 +116,40 @@ class Operator:
 
     def route_alerts(self, evaluate_from: datetime, **detect_options: Any) -> list[AlertOutcome]:
         """Detect persona deviations after `evaluate_from` (earlier rows are the baseline) and apply the
-        configured response to each alert. Returns one outcome per alert."""
+        configured response to each alert not routed before. Returns one outcome per newly routed alert.
+
+        Refuses to act when any row fails verification or parsing. Row MACs prove each row is unaltered, not that
+        the log is complete: a deleted or truncated row is invisible here. A persisted cursor (the latest alert
+        time routed) keeps a rescan of the same log from acting twice, also after the sink's replay window."""
         result = detect_file(
             self._audit_path, DetectConfig(evaluate_from=evaluate_from, **detect_options), secret=self._audit_key
         )
-        return [
-            self._sink.handle(sign_alert(alert, self._alert_key, WRITER_ID, int(self._clock())))
-            for alert in result.alerts
+        if result.untrusted or result.malformed:
+            counts = f"{result.untrusted} unverified and {result.malformed} malformed rows"
+            raise AuditIntegrityError(f"audit log has {counts}; no alert was routed")
+        cursor = self._read_cursor()
+        fresh = [alert for alert in result.alerts if cursor is None or datetime.fromisoformat(alert.ts) > cursor]
+        outcomes = [
+            self._sink.handle(sign_alert(alert, self._alert_key, WRITER_ID, int(self._clock()), alert_id(alert)))
+            for alert in fresh
         ]
+        if fresh:
+            self._write_cursor(max(datetime.fromisoformat(alert.ts) for alert in fresh))
+        return outcomes
+
+    def _read_cursor(self) -> datetime | None:
+        path = self._alert_state_dir / CURSOR_NAME
+        if not path.exists():
+            return None
+        return datetime.fromisoformat(path.read_text().strip())
+
+    def _write_cursor(self, routed_until: datetime) -> None:
+        path = self._alert_state_dir / CURSOR_NAME
+        temporary = path.with_name(f".{CURSOR_NAME}.{os.getpid()}")
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            os.write(descriptor, routed_until.isoformat().encode())
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path)
