@@ -23,3 +23,7 @@ jobs:
       - run: ruff check
       - run: ruff format --check
       - run: pytest -q
+      - run: sudo useradd --system --no-create-home --shell /usr/sbin/nologin asr-agent
+      - run: pytest -q tests/test_separate_user.py
+        env:
+          ASR_AGENT_USER: asr-agent

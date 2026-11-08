@@ -15,7 +15,7 @@ from demo.world import DEPLOY_SCOPE, EXECUTOR_ID, World
 from executor import server as server_module
 from executor.client import send_frame
 from executor.credentials import executor_key_id
-from executor.protocol import MAX_FRAME_BYTES, decode_request, derive_op_id, encode_request
+from executor.protocol import MAX_FRAME_BYTES, ProtocolError, decode_request, derive_op_id, encode_request
 from executor.server import ExecutorServer, prepare_run_dir
 from executor.targets import RecordingTarget
 
@@ -351,3 +351,40 @@ def test_run_dir_under_a_sticky_shared_parent_is_accepted(tmp_path):
     shared.mkdir()
     os.chmod(shared, 0o1777)
     assert prepare_run_dir(shared / "run") == shared / "run"
+
+
+def test_peer_other_than_the_allowed_user_is_closed_without_a_response(world, alice, monkeypatch):
+    monkeypatch.setattr(server_module, "peer_uid", lambda connection: os.geteuid() + 1, raising=False)
+    running = world.start_in_process()
+    with pytest.raises((ProtocolError, OSError)):
+        send_frame(running.socket_path, b"{}")
+    assert world.effects("deploy-api") == []
+
+
+def test_separate_user_mode_opens_the_socket_to_the_agent_user_only():
+    world = World(agent_uid=os.geteuid() + 1)
+    try:
+        running = world.start_in_process()
+        assert stat.S_IMODE(os.stat(running.socket_path.parent).st_mode) == 0o711
+        assert stat.S_IMODE(os.stat(running.socket_path).st_mode) == 0o666
+        for path in (world.exec_dir / "secrets").iterdir():
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        agent = Agent("alice")
+        world.root_for(agent)
+        request = agent.request(
+            audience=EXECUTOR_ID, now=world.now, tool=DEPLOY[0], resource=DEPLOY[1], args=DEPLOY[2], nonce="n1"
+        )
+        with pytest.raises((ProtocolError, OSError)):
+            send_frame(running.socket_path, encode_request(request))
+        assert world.effects("deploy-api") == []
+    finally:
+        world.stop()
+
+
+def test_agent_user_must_differ_from_the_executor_user():
+    world = World(agent_uid=os.geteuid())
+    try:
+        with pytest.raises(ValueError, match="agent_uid"):
+            world.start_in_process()
+    finally:
+        world.stop()
