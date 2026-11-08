@@ -24,12 +24,22 @@ ALERT_KEY_MIN_BYTES = 32
 ROUTED_FILE = "routed.jsonl"
 ROUTED_LOCK = "routed.lock"
 FINAL_REASONS = frozenset({"suspended", "revoked", "report_only", "no_task_root"})
+AGGREGATE_KINDS = frozenset({"rate_above_baseline", "outside_usual_hours"})
+
+
+class RoutedStateCorrupt(Exception):
+    """The record of routed alerts cannot be read, so no alert is routed until an operator repairs it."""
 
 
 def alert_key(alert: Alert) -> str:
-    """One detected event: its kind, persona, tenant and time. An aggregate that grows within the same time bucket
-    keeps its key, so it is acted on once."""
-    body = json.dumps([alert.kind, alert.persona, alert.tenant_id, alert.ts], separators=(",", ":"))
+    """One detected event: its kind, persona, tenant, time and task roots, plus its detail (the tool or resource)
+    for a first-use alert. An aggregate's detail carries its count, so a count growing within one time bucket
+    keeps the key and is acted on once; a task root joining the bucket changes the key and is acted on again."""
+    detail = None if alert.kind in AGGREGATE_KINDS else alert.detail
+    body = json.dumps(
+        [alert.kind, alert.persona, alert.tenant_id, alert.ts, sorted(alert.task_roots), detail],
+        separators=(",", ":"),
+    )
     return hashlib.sha256(body.encode()).hexdigest()
 
 
@@ -125,7 +135,10 @@ class Operator:
         an operator repairs it. Row MACs prove each row is unaltered, not that the log is complete: a deleted or
         truncated row is invisible here. Each alert whose action reached a final outcome (suspended, revoked,
         report only, no task root) is recorded in the alert state directory and never acted on again; any other
-        outcome, or an action that raises, is retried on the next scan. Scans hold a lock, so two never interleave."""
+        outcome, or an action that raises, is retried on the next scan. Delivery is at least once: a crash after an
+        action and before its record re-applies the action on the next scan. An action that raises does not stop
+        the alerts after it; the errors are raised together once every alert was tried. Scans hold a lock, so two
+        never interleave."""
         result = detect_file(
             self._audit_path, DetectConfig(evaluate_from=evaluate_from, **detect_options), secret=self._audit_key
         )
@@ -137,15 +150,22 @@ class Operator:
             fcntl.flock(lock, fcntl.LOCK_EX)
             routed = self._read_routed()
             outcomes = []
+            errors: list[Exception] = []
             for alert in result.alerts:
                 key = alert_key(alert)
                 if key in routed:
                     continue
-                outcome = self._sink.handle(sign_alert(alert, self._alert_key, WRITER_ID, int(self._clock())))
+                try:
+                    outcome = self._sink.handle(sign_alert(alert, self._alert_key, WRITER_ID, int(self._clock())))
+                except Exception as err:
+                    errors.append(err)
+                    continue
                 outcomes.append(outcome)
                 if outcome.reason in FINAL_REASONS:
                     self._record_routed(key, outcome)
                     routed.add(key)
+            if errors:
+                raise ExceptionGroup(f"{len(errors)} alert actions failed and will be retried", errors)
             return outcomes
         finally:
             os.close(lock)
@@ -155,15 +175,26 @@ class Operator:
             descriptor = os.open(self._alert_state_dir / ROUTED_FILE, os.O_RDONLY | os.O_NOFOLLOW)
         except FileNotFoundError:
             return set()
+        path = self._alert_state_dir / ROUTED_FILE
         with os.fdopen(descriptor, "rb") as handle:
-            return {json.loads(line)["key"] for line in handle if line.strip()}
+            keys = set()
+            for number, line in enumerate(handle, start=1):
+                try:
+                    keys.add(json.loads(line)["key"])
+                except (ValueError, KeyError, TypeError) as err:
+                    raise RoutedStateCorrupt(
+                        f"{path} line {number} is unreadable ({err}); remove or repair that line, then scan again"
+                    ) from err
+        return keys
 
     def _record_routed(self, key: str, outcome: AlertOutcome) -> None:
         line = json.dumps({"key": key, "action": outcome.action, "reason": outcome.reason}) + "\n"
         flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
         descriptor = os.open(self._alert_state_dir / ROUTED_FILE, flags, 0o600)
         try:
-            os.write(descriptor, line.encode())
+            data = line.encode()
+            if os.write(descriptor, data) != len(data):
+                raise OSError(f"short write to {ROUTED_FILE}")
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
