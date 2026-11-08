@@ -1,76 +1,14 @@
 # agentic-security-reference
 
-A reference architecture and runnable demo for agentic security. It treats an agent as a steerable, untrusted insider, so authority is a task and a chain of delegations rather than a standing role, and every effect is checked where it happens.
+A runnable reference for giving AI agents authority without giving them credentials.
 
-The code here is glue plus a demo. The primitives live in two libraries, pinned to commit SHAs in `pyproject.toml`: [agent-warrant](https://github.com/agent-rails/agent-warrant) (signed task roots, delegation chains, the budget and revocation ledger) and [agent-guard](https://github.com/agent-rails/agent-guard) (policy decision, credential injector, evidence, detection).
+An agent can be steered by what it reads, so this design treats it as an untrusted insider. The agent never holds a secret. It carries a signed, task-scoped chain of authority, and a separate process checks every action before it happens, performs it, and records evidence.
 
-## Motivation
+It is for engineers and security teams who run agents that deploy, move money, or touch production, and want a pattern they can read, run and adapt.
 
-Two public posts, both the companies' own reports:
+## Try it
 
-- Uber, [Securing AI agents](https://www.uber.com/us/en/blog/securing-ai-agents/): a registry, a decision service, enforcement in an SDK, declared versus observed capability, one trace, and replay before enforcing. It publishes no numbers.
-- Binance, initial report of 29 October 2026 (the mechanism of the AI-tool misuse was not disclosed): a long-lived deploy token on a laptop used from another engineer's machine, a signing service that accepted requests outside the normal process, five hot wallets drained in about four minutes and caught by a volume alert, and on-chain delegations that outlived the shutdown. Scenario 5 reproduces one of these patterns, a copied credential presented elsewhere. It makes no claim about Binance's systems.
-
-## Thesis
-
-- An agent is steerable by what it reads. It must not hold standing credentials or decide its own authority.
-- The unit of authority is a task: a signed task root issued for a human, narrowed at every delegation hop, with a budget and an expiry.
-- The check sits at the effect, in a process the agent cannot reach, and fails closed.
-- Evidence for a verified request carries identity taken from the chain, never from the request.
-- Stopping has two independent levers: refuse new credentials (effect stop) and revoke chains (authority stop).
-
-## Layers
-
-Built means exercised by a test in this repository. The evidence for each row is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#layer-coverage).
-
-| Layer | Status |
-|---|---|
-| Human request | built, with limits |
-| Issuer | built, with limits |
-| Task root | built |
-| Delegation | built |
-| Agent | stated limit |
-| Decision | built, with limits |
-| Credential | built, enforced only where the target verifies it |
-| Effect | fake targets only |
-| Evidence | built, with limits |
-| Detection | built, off the request path |
-| Stop | built, with limits |
-
-## Modes
-
-| Mode | What it is | Custody claim |
-|---|---|---|
-| Advisory | agent-guard in the agent's process | none: records and steers; same-user code can bypass or roll back state |
-| Enforced | the executor in its own process holds all secrets and performs effects | the agent process holds no secret. With `agent_uid` and `agent_gid` set, the agent runs as another OS user and cannot read the executor's files (tested on Linux in CI); without them, the agent shares the executor's user and can read them. Egress is not restricted because no egress proxy is built, so the agent must run with egress denied |
-| Isolated | enforced plus a sandbox (VM or container) around the agent | not built |
-
-## Adoption paths
-
-| You have | Use | You get |
-|---|---|---|
-| Only a tool-call hook | agent-guard alone | policy decision, audit, advisory mode |
-| Only services that must accept delegated authority | agent-warrant alone | `verify_chain` in your service, plus the ledger for revocation and budgets |
-| An agent that must not hold credentials | both, through the executor in this repository | enforced mode as demonstrated here |
-
-## Records and signing
-
-The reader surface is four records: `TaskRoot`, `ChainLink`, `LeafProof` and `Operation`. agent-warrant's v1 `Grant` and `RevocationList` are legacy and are not used here.
-
-| Scheme | Used for | Key holder |
-|---|---|---|
-| Ed25519 | `TaskRoot` (issuer key), `ChainLink` (parent holder key), `LeafProof` (leaf holder key), the executor's proof over a credential (executor key) | each signer; verifiable without sharing a secret |
-| HMAC-SHA256 | audit records (audit key), alerts (alert key), the credential MAC (the target's secret) | shared between signer and verifier |
-
-The alert key protects alerts written by a separate detector. Alerts the operator detects and routes itself are signed and checked inside one process, so the key adds nothing there.
-
-## MCP
-
-No MCP client is built here. The design fit: the executor would be the MCP client and hold the credentials, obtain a separate token per MCP server audience, and never forward a task grant or any token it received. The MCP authorization specification requires a server not to accept or pass through tokens issued for other audiences (as read on 2026-11-07, version 2026-07-28).
-
-## Quickstart
-
-Install, lint, type-check and test (the same commands CI runs):
+Python 3.13:
 
 ```sh ci
 python -m pip install -e ".[dev]"
@@ -80,13 +18,83 @@ mypy
 pytest -q
 ```
 
-Run the eleven scenarios, each printing what happened and asserting it:
+Run the eleven scenarios. Each prints what happened and checks it:
 
 ```sh runnable
 python -m demo
 ```
 
-A scenario is an ordinary function. This one is copied from the test suite and builds a world, a task root and a request:
+The last line should read `11 of 11 scenarios passed`.
+
+## What the demo shows
+
+| # | Scenario | What it proves |
+|---|---|---|
+| 1 | happy path | a human's task reaches an effect through one delegation hop |
+| 2 | budget exhaustion | a task's budget holds across every hop |
+| 3 | root revocation | revoking a task stops every agent below it |
+| 4 | mid-chain revocation | revoking one link stops only that subtree |
+| 5 | stolen credential | a copied credential fails at the target |
+| 6 | rogue issuer | a validly signed task from an untrusted issuer is refused |
+| 7 | kill levers | stop new effects, or stop authority, independently |
+| 8 | crash recovery | a fault between steps never issues a second credential |
+| 9 | enforced mode | the agent process holds no secret and still gets its effect |
+| 10 | persona deviation | an unusual in-scope action is flagged and the executor suspended |
+| 11 | alert stops a chain | an alert revokes a live delegation chain mid-task |
+
+## How it works
+
+```mermaid
+flowchart LR
+    H[Human] -->|ID token| I[Issuer]
+    I -->|signed task root| A[Agent]
+    A -->|narrower delegation| S[Sub-agent]
+    S -->|request + proof| X[Executor]
+    X -->|check, reserve, credential| T[Target]
+    X -->|signed evidence| E[(Audit log)]
+    E --> O[Operator: detect, suspend, revoke]
+```
+
+1. **A human starts a task.** The issuer verifies their OIDC ID token and signs a task root: who asked, for what purpose, with what scope, budget and expiry.
+2. **Agents delegate.** Each hop signs a narrower link. Scope and budget can only shrink.
+3. **The executor checks every action.** It runs in its own process and holds all secrets. It verifies the chain, scope, cost and policy, and reserves budget in the ledger.
+4. **It performs the effect.** It mints a short-lived credential bound to that one operation. The agent never sees the credential.
+5. **It records evidence, and the operator can stop things.** Identity comes from the verified chain, never from the request. The operator suspends new credentials or revokes authority, by hand or from alerts.
+
+Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## What is protected
+
+| Mode | What it is | What you can claim |
+|---|---|---|
+| Advisory | agent-guard inside the agent's process | records and steers; not a security boundary |
+| Enforced | the executor in its own process holds all secrets | the agent process holds no secret. Set `agent_uid` and `agent_gid` to run the agent as another OS user that cannot read the executor's files (tested on Linux in CI); without them, an agent on the same user can read them |
+| Isolated | enforced, plus a VM or container around the agent | not built |
+
+Not covered, among others:
+
+- **Egress:** no egress proxy is built, so in enforced mode the agent must run with network egress denied.
+- **Real targets:** the targets are fakes that verify the credential binding; a real target that accepts any bearer token gets weaker protection.
+- **Detection:** it runs after the fact, so a flagged action has already happened.
+- **Scale:** the ledger is one SQLite file on one host.
+- **Prompt injection itself:** this limits what a compromised agent can do, not whether it is compromised.
+
+Full list, each defence tied to a test: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+
+## Use it
+
+The code here is glue plus a demo. The primitives live in two libraries, pinned to commit SHAs in `pyproject.toml`:
+
+- [agent-warrant](https://github.com/agent-rails/agent-warrant): signed task roots, delegation chains, and the budget and revocation ledger.
+- [agent-guard](https://github.com/agent-rails/agent-guard): policy decisions, the credential injector, evidence and detection.
+
+| You have | Use | You get |
+|---|---|---|
+| Only a tool-call hook | agent-guard alone | policy decisions and audit, advisory mode |
+| Services that must accept delegated authority | agent-warrant alone | `verify_chain` in your service, plus the ledger for revocation and budgets |
+| An agent that must not hold credentials | both, through the executor here | enforced mode as demonstrated |
+
+A scenario is an ordinary function. This one builds a world, issues a task root and sends a request:
 
 ```python runnable
 from demo.agents import Agent
@@ -103,14 +111,33 @@ finally:
     world.stop()
 ```
 
-## Repository map
+## Why
+
+Three failure patterns recur once agents get real access:
+
+- **A copied token works anywhere.** A long-lived token on one machine is used from another. Here each credential is bound to one operation and the executor's key, and lives seconds; a copy fails at the target (scenario 5).
+- **A side door skips the checks.** A service accepts a request that did not go through the normal process. Here every effect passes the executor, and the targets accept only credentials it injected (scenarios 1 and 5).
+- **Authority outlives the decision to stop.** Delegations keep working after the shutdown. Here revoking a task, a link or a tenant stops every chain below it on the next request (scenarios 3, 4, 7 and 11).
+
+## Documentation
+
+| Document | Read it for |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | the request path, layer coverage, records and signing, MCP fit |
+| [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | what is defended, with tests, and what is not |
+| [docs/DECISIONS.md](docs/DECISIONS.md) | why it is built this way |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | what to do when something refuses to continue |
+| [docs/RISK_MAPPING.md](docs/RISK_MAPPING.md) | a partial mapping to OWASP and NIST names |
 
 | Path | Contents |
 |---|---|
-| `executor/` | the effect executor: protocol, core, server, operator, credentials, targets |
-| `issuer/` | OIDC task-root issuer |
-| `demo/` | scenarios and the world they run in |
-| `tests/` | unit and integration tests; the scenarios run as tests |
-| `docs/` | architecture, threat model, decisions, risk mapping, operations |
+| `executor/` | the executor: protocol, core, server, operator, credentials, targets |
+| `issuer/` | the OIDC task-root issuer |
+| `demo/` | the scenarios and the world they run in |
+| `tests/` | unit and integration tests; the scenarios also run as tests |
 
-Every fenced `sh` or `python` block in the docs is either run by `tests/test_docs_commands.py` or is a command that `.github/workflows/ci.yml` runs.
+Every fenced `sh` or `python` block in these docs is either run by `tests/test_docs_commands.py` or is a command that `.github/workflows/ci.yml` runs.
+
+## License
+
+Apache-2.0.
