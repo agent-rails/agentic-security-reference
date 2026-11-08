@@ -127,6 +127,7 @@ Three failure patterns recur once agents get real access:
 | [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | what is defended, with tests, and what is not |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | why it is built this way |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | what to do when something refuses to continue |
+| [docs/LIVE_RUN.md](docs/LIVE_RUN.md) | a real model driving the agent, and what it showed |
 | [docs/RISK_MAPPING.md](docs/RISK_MAPPING.md) | a partial mapping to OWASP and NIST names |
 
 | Path | Contents |
@@ -134,6 +135,7 @@ Three failure patterns recur once agents get real access:
 | `executor/` | the executor: protocol, core, server, operator, credentials, targets |
 | `issuer/` | the OIDC task-root issuer |
 | `demo/` | the scenarios and the world they run in |
+| `live/` | the live run: the agent's tool server and the run script |
 | `tests/` | unit and integration tests; the scenarios also run as tests |
 
 Every fenced `sh` or `python` block in these docs is either run by `tests/test_docs_commands.py` or is a command that `.github/workflows/ci.yml` runs.
