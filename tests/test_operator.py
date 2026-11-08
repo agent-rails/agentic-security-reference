@@ -145,10 +145,18 @@ def stub_detector(monkeypatch, batches):
     monkeypatch.setattr(operator_module, "detect_file", detect)
 
 
-def alert(kind, ts, count=1):
+def alert(kind, ts, count=1, detail=None, task_roots=()):
     from agent_guard.detect import Alert
 
-    return Alert(kind=kind, persona="p", tenant_id="tenant-a", ts=ts, detail=f"{kind} x{count}", count=count)
+    return Alert(
+        kind=kind,
+        persona="p",
+        tenant_id="tenant-a",
+        ts=ts,
+        detail=detail or f"{kind} x{count}",
+        count=count,
+        task_roots=tuple(task_roots),
+    )
 
 
 LATER = "2026-11-08T17:09:03+00:00"
@@ -209,8 +217,9 @@ def test_alert_whose_action_raised_is_retried(world, monkeypatch):
         return real_suspend(*arguments, **keywords)
 
     monkeypatch.setattr(operator._injector, "suspend", failing_once)
-    with pytest.raises(OSError, match="disk full"):
+    with pytest.raises(ExceptionGroup) as raised:
         operator.route_alerts(datetime.now(UTC))
+    assert raised.group_contains(OSError, match="disk full")
     assert [o.reason for o in operator.route_alerts(datetime.now(UTC))] == ["suspended"]
     assert operator.suspended is True
 
@@ -232,3 +241,54 @@ def test_concurrent_scans_wait_for_each_other(world, monkeypatch):
         fcntl.flock(held, fcntl.LOCK_UN)
     scan.join(10)
     assert [o.reason for o in results[0]] == ["suspended"]
+
+
+def test_an_aggregate_that_gains_a_task_root_acts_again(world, monkeypatch):
+    stub_detector(
+        monkeypatch,
+        [
+            [alert("rate_above_baseline", BUCKET, 3, task_roots=["root-a"])],
+            [alert("rate_above_baseline", BUCKET, 5, task_roots=["root-a", "root-b"])],
+        ],
+    )
+    operator = world.operator()
+    operator.route_alerts(datetime.now(UTC))
+    operator.resume("operator:oncall")
+    assert [o.reason for o in operator.route_alerts(datetime.now(UTC))] == ["suspended"]
+
+
+def test_two_first_use_alerts_at_the_same_time_are_two_events(world, monkeypatch):
+    first = alert("first_tool_use", LATER, detail="first use of tool deploy.rollback")
+    second = alert("first_tool_use", LATER, detail="first use of tool deploy.delete")
+    stub_detector(monkeypatch, [[first], [first, second]])
+    operator = world.operator()
+    operator.route_alerts(datetime.now(UTC))
+    operator.resume("operator:oncall")
+    assert [o.reason for o in operator.route_alerts(datetime.now(UTC))] == ["suspended"]
+
+
+def test_a_failing_action_does_not_block_later_alerts(world, monkeypatch):
+    stub_detector(
+        monkeypatch,
+        [[alert("first_resource_use", LATER, task_roots=["root-a"]), alert("first_tool_use", LATER)]],
+    )
+    operator = world.operator()
+
+    def broken(*arguments, **keywords):
+        raise OSError("ledger offline")
+
+    monkeypatch.setattr(operator.ledger, "revoke", broken)
+    with pytest.raises(ExceptionGroup) as raised:
+        operator.route_alerts(datetime.now(UTC))
+    assert raised.group_contains(OSError, match="ledger offline")
+    assert operator.suspended is True
+
+
+def test_a_torn_routed_record_is_refused_with_repair_instructions(world, monkeypatch):
+    from executor.operator import RoutedStateCorrupt
+
+    stub_detector(monkeypatch, [[alert("first_tool_use", LATER)]])
+    operator = world.operator()
+    (world.exec_dir / "alert-state" / "routed.jsonl").write_text('{"key": "abc')
+    with pytest.raises(RoutedStateCorrupt, match="routed.jsonl"):
+        operator.route_alerts(datetime.now(UTC))
