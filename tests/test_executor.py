@@ -3,6 +3,8 @@ import os
 import socket
 import stat
 import struct
+import threading
+import time
 
 import pytest
 from agent_guard.audit import AuditRecord, verify_record
@@ -10,9 +12,12 @@ from agent_warrant.ledger import Refused
 
 from demo.agents import Agent
 from demo.world import DEPLOY_SCOPE, EXECUTOR_ID, World
+from executor import server as server_module
 from executor.client import send_frame
+from executor.credentials import executor_key_id
 from executor.protocol import MAX_FRAME_BYTES, decode_request, derive_op_id, encode_request
 from executor.server import ExecutorServer, prepare_run_dir
+from executor.targets import RecordingTarget
 
 DEPLOY = ("deploy.service", "env/staging/api", {"image": "api:1"})
 
@@ -226,3 +231,123 @@ def test_suspended_executor_refuses_before_reserving(world, running, alice):
 
 def test_world_is_isolated_per_test(world, running):
     assert isinstance(world, World)
+
+
+class _BlockingTarget(RecordingTarget):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def apply(self, operation, args):
+        self.entered.set()
+        assert self.release.wait(10)
+        return super().apply(operation, args)
+
+
+class _FailingMinter:
+    def mint(self, *args, **kwargs):
+        raise RuntimeError("mint failed")
+
+
+def test_replay_while_the_first_request_is_in_flight_leaves_the_first_one_alone(world, alice):
+    target = _BlockingTarget(
+        "deploy-api",
+        "deploy-api",
+        world.secrets["deploy-api"],
+        executor_key_id(world.executor_key),
+        ["deploy.service", "deploy.rollback", "deploy.delete"],
+        world.clock,
+    )
+    running = world.start_in_process(targets={"deploy.service": target})
+    first: dict = {}
+    sender = threading.Thread(target=lambda: first.update(world.send(alice, *DEPLOY, "n1")))
+    sender.start()
+    assert target.entered.wait(10)
+    replay = world.send(alice, *DEPLOY, "n1")
+    target.release.set()
+    sender.join(10)
+    assert (replay["status"], replay["reason"]) == ("refused", "in_progress")
+    assert (first["status"], first["state"]) == ("done", "done")
+    assert running.built.ledger.reservation("tenant-a", "task-1", first["op_id"], world.now).state == "done"
+    assert len(target.effects) == 1
+
+
+def test_unknown_outcome_reports_the_state_after_the_transition(world, alice):
+    world.start_in_process(minter=_FailingMinter())
+    response = world.send(alice, *DEPLOY, "n1")
+    assert (response["status"], response["reason"]) == ("outcome_unknown", "mint_failed")
+    assert response["state"] == "outcome_unknown"
+
+
+def test_evidence_marks_executed_only_once_the_target_was_called(world, alice):
+    world.start_in_process(minter=_FailingMinter())
+    world.send(alice, *DEPLOY, "n1")
+    assert [(row["event"], row["executed"]) for row in world.audit_rows()] == [
+        ("release", False),
+        ("terminal", False),
+    ]
+
+
+def test_evidence_of_a_performed_effect_is_marked_executed_at_the_terminal_row(world, running, alice):
+    world.send(alice, *DEPLOY, "n1")
+    assert [(row["event"], row["executed"]) for row in world.audit_rows()] == [
+        ("release", False),
+        ("terminal", True),
+    ]
+
+
+def test_frame_must_arrive_before_an_absolute_deadline(world, monkeypatch):
+    monkeypatch.setattr(server_module, "FRAME_DEADLINE_SECONDS", 0.5, raising=False)
+    running = world.start_in_process()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(10)
+        connection.connect(str(running.socket_path))
+        connection.sendall(struct.pack(">I", 100))
+        started = time.monotonic()
+        closed = False
+        while time.monotonic() - started < 5:
+            try:
+                connection.sendall(b"x")
+            except OSError:
+                closed = True
+                break
+            time.sleep(0.1)
+        assert closed
+        assert time.monotonic() - started < 3
+
+
+def test_connections_over_the_cap_are_closed_and_service_recovers(world, alice, monkeypatch):
+    monkeypatch.setattr(server_module, "MAX_CONNECTIONS", 2, raising=False)
+    running = world.start_in_process()
+    idle = []
+    for _ in range(2):
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        connection.settimeout(10)
+        connection.connect(str(running.socket_path))
+        connection.sendall(b"\x00")
+        idle.append(connection)
+    time.sleep(0.2)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as extra:
+        extra.settimeout(10)
+        extra.connect(str(running.socket_path))
+        assert extra.recv(1) == b""
+    for connection in idle:
+        connection.close()
+    time.sleep(0.2)
+    assert world.send(alice, *DEPLOY, "n1")["status"] == "done"
+
+
+def test_run_dir_under_a_parent_others_can_write_is_refused(tmp_path):
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    os.chmod(shared, 0o777)
+    with pytest.raises(ValueError, match="writable"):
+        prepare_run_dir(shared / "run")
+
+
+def test_run_dir_under_a_sticky_shared_parent_is_accepted(tmp_path):
+    shared = tmp_path / "sticky"
+    shared.mkdir()
+    os.chmod(shared, 0o1777)
+    assert prepare_run_dir(shared / "run") == shared / "run"
