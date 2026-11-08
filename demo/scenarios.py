@@ -367,7 +367,8 @@ def enforced_mode(story: Story) -> None:
         story.expect("socket directory mode", oct(stat.S_IMODE(running.socket_path.parent.stat().st_mode)), "0o700")
         story.expect("ledger mode", oct(stat.S_IMODE(world.ledger_path.stat().st_mode)), "0o600")
         story.say(
-            "limits: same OS user can still read these files; egress is not restricted (no egress proxy is built)"
+            "limits: this run uses one OS user, which can still read these files; set agent_uid and agent_gid to run "
+            "the agent as another user (tests/test_separate_user.py); egress is not restricted (no egress proxy)"
         )
 
 
