@@ -22,7 +22,6 @@ from executor.credentials import write_executor_key
 from executor.operator import Operator
 from executor.protocol import Request
 from executor.server import SOCKET_NAME, ExecutorServer
-from executor.targets import Target
 
 from .agents import Agent
 
@@ -201,8 +200,8 @@ class World:
             ],
         }
 
-    def start_in_process(self, *, minter: Any = None, targets: Mapping[str, Target] | None = None) -> Running:
-        built = build_executor(self.config, self.clock, minter=minter, targets=targets)
+    def start_in_process(self, **overrides: Any) -> Running:
+        built = build_executor(self.config, self.clock, **overrides)
         server = ExecutorServer(built.executor, built.run_dir, built.agent_uid, built.agent_gid)
         server.start_in_background()
         self.running = Running(server.socket_path, server=server, built=built)
