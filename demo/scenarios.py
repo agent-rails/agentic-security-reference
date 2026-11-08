@@ -57,7 +57,59 @@ def budget_exhaustion(story: Story) -> None:
         story.expect("pool spent", running.built.ledger.task_budget(TENANT, "task-1", world.now).spent, 5)
 
 
+def root_revocation_cascade(story: Story) -> None:
+    """Revoking the task root stops every holder below it, including delegations made earlier."""
+    with story.world() as world:
+        world.start_in_process()
+        operator = world.operator()
+        alice = story.name(Agent("alice"), "release-bot")
+        bob = story.name(Agent("bob"), "deploy-helper")
+        carol = story.name(Agent("carol"), "sub-helper")
+        other = story.name(Agent("other"), "other-task")
+        world.root_for(alice, task_id="task-1")
+        world.root_for(other, task_id="task-2")
+        alice.delegate_to(bob, scope=DEPLOY_SCOPE, budget=10, ttl=600, now=world.now)
+        bob.delegate_to(carol, scope=DEPLOY_SCOPE, budget=5, ttl=600, now=world.now)
+        for agent in (alice, bob, carol):
+            story.outcome(
+                f"{story.who(agent.public_key)} before revocation", world.send(agent, *DEPLOY, "before"), "done"
+            )
+        operator.revoke_binding(alice.root.binding())
+        story.say("operator revoked the task root binding in the ledger")
+        for agent in (alice, bob, carol):
+            response = world.send(agent, *DEPLOY, "after")
+            story.outcome(f"{story.who(agent.public_key)} after revocation", response, "refused", "chain_invalid")
+            story.expect("reason", "revoked" in response["detail"], True)
+        story.outcome("an unrelated task is unaffected", world.send(other, *DEPLOY, "n1"), "done")
+        story.expect("effects performed", len(world.effects("deploy-api")), 4)
+
+
+def mid_chain_revocation(story: Story) -> None:
+    """Revoking one link stops that holder and everything delegated from it, and nobody else."""
+    with story.world() as world:
+        world.start_in_process()
+        operator = world.operator()
+        alice = story.name(Agent("alice"), "release-bot")
+        bob = story.name(Agent("bob"), "deploy-helper")
+        carol = story.name(Agent("carol"), "other-helper")
+        dave = story.name(Agent("dave"), "bobs-sub-helper")
+        world.root_for(alice)
+        alice.delegate_to(bob, scope=DEPLOY_SCOPE, budget=10, ttl=600, now=world.now)
+        alice.delegate_to(carol, scope=DEPLOY_SCOPE, budget=10, ttl=600, now=world.now)
+        bob.delegate_to(dave, scope=DEPLOY_SCOPE, budget=5, ttl=600, now=world.now)
+        operator.revoke_binding(bob.links[0].binding())
+        story.say("operator revoked the link that gave deploy-helper its authority")
+        for agent in (bob, dave):
+            response = world.send(agent, *DEPLOY, "n1")
+            story.outcome(f"{story.who(agent.public_key)} is stopped", response, "refused", "chain_invalid")
+        for agent in (alice, carol):
+            story.outcome(f"{story.who(agent.public_key)} keeps working", world.send(agent, *DEPLOY, "n1"), "done")
+        story.expect("effects performed", len(world.effects("deploy-api")), 2)
+
+
 SCENARIOS: list[tuple[int, str, Callable[[Story], None]]] = [
     (1, "happy path through one delegation hop", happy_path),
     (2, "budget exhaustion across hops", budget_exhaustion),
+    (3, "root revocation cascades to every descendant", root_revocation_cascade),
+    (4, "mid-chain revocation stops only that subtree", mid_chain_revocation),
 ]
