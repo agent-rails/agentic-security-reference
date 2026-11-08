@@ -47,10 +47,13 @@ def request_digest(tool: str, resource: str, args: dict[str, Any], nonce: str) -
     return sha256_b64u(REQUEST_DOMAIN + body)
 
 
-def derive_op_id(tenant_id: str, task_id: str, digest_of_request: str) -> str:
-    """Idempotency key for one request. Always derived by the executor from the verified tenant and task and the
-    request digest; the wire request has no op_id field, so an agent cannot choose or collide one."""
-    body = canonicalize({"tenant_id": tenant_id, "task_id": task_id, "request": digest_of_request})
+def derive_op_id(tenant_id: str, task_id: str, leaf_binding: str, digest_of_request: str) -> str:
+    """Idempotency key for one request, always derived by the executor from the verified tenant, task and leaf
+    record and the request digest. Two holders sending the same request are two operations. The wire request
+    has no op_id field, so an agent cannot choose or collide one."""
+    body = canonicalize(
+        {"tenant_id": tenant_id, "task_id": task_id, "leaf": leaf_binding, "request": digest_of_request}
+    )
     return sha256_b64u(OP_ID_DOMAIN + body)
 
 

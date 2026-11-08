@@ -158,11 +158,24 @@ def test_new_nonce_is_a_new_operation(world, running, alice):
     assert len(world.effects("deploy-api")) == 2
 
 
-def test_op_id_is_derived_from_tenant_task_and_request():
-    assert derive_op_id("t1", "a", "d") != derive_op_id("t2", "a", "d")
-    assert derive_op_id("t1", "a", "d") != derive_op_id("t1", "b", "d")
-    assert derive_op_id("t1", "a", "d") != derive_op_id("t1", "a", "e")
-    assert derive_op_id("t1", "a|b", "d") != derive_op_id("t1", "a", "b|d")
+def test_op_id_is_derived_from_tenant_task_leaf_and_request():
+    base = ("t1", "a", "leaf", "d")
+    assert derive_op_id(*base) == derive_op_id(*base)
+    for position, other in enumerate(("t2", "b", "leaf2", "e")):
+        changed = list(base)
+        changed[position] = other
+        assert derive_op_id(*changed) != derive_op_id(*base)
+    assert derive_op_id("t1", "a|b", "l", "d") != derive_op_id("t1", "a", "b|l", "d")
+
+
+def test_two_holders_sending_the_same_request_are_two_operations(world, running, alice):
+    from demo.world import DEPLOY_SCOPE
+
+    bob = Agent("bob")
+    alice.delegate_to(bob, scope=DEPLOY_SCOPE, budget=5, ttl=600, now=world.now)
+    assert world.send(alice, *DEPLOY, "n1")["status"] == "done"
+    assert world.send(bob, *DEPLOY, "n1")["status"] == "done"
+    assert len(world.effects("deploy-api")) == 2
 
 
 def test_socket_is_private_and_run_dir_is_checked(world, running, tmp_path):
