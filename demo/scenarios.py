@@ -230,7 +230,8 @@ def kill_levers(story: Story) -> None:
 
 
 def crash_recovery(story: Story) -> None:
-    """A crash between steps never issues two credentials and never loses track of what may have happened."""
+    """A crash between steps never issues two credentials and never loses track of what may have happened. Each
+    fault is followed by a restart: the executor is stopped and a new one is built from the state on disk."""
     with story.world() as world:
         flaky: list[FlakyLedger] = []
 
@@ -246,8 +247,10 @@ def crash_recovery(story: Story) -> None:
         story.expect(
             "no effect and no credential yet", (len(world.effects("deploy-api")), issuance_count(world)), (0, 0)
         )
+        running.stop()
+        running = world.start_in_process()
         response = world.send(agent, *DEPLOY, "n1")
-        story.outcome("the agent retries the same request", response, "done")
+        story.outcome("after a restart, the agent retries the same request", response, "done")
         story.expect(
             "one effect, one credential, cost charged once",
             (len(world.effects("deploy-api")), issuance_count(world)),
@@ -261,8 +264,13 @@ def crash_recovery(story: Story) -> None:
         world.root_for(agent)
         response = world.send(agent, *DEPLOY, "n1")
         story.outcome("crash while minting, after the issuance record", response, "outcome_unknown", "mint_failed")
+        running.stop()
+        running = world.start_in_process()
         story.outcome(
-            "the agent retries the same request", world.send(agent, *DEPLOY, "n1"), "refused", "already_outcome_unknown"
+            "after a restart, the agent retries the same request",
+            world.send(agent, *DEPLOY, "n1"),
+            "refused",
+            "already_outcome_unknown",
         )
         story.expect("no second credential was minted", (minter.attempts, issuance_count(world)), (1, 1))
         story.expect("no effect was performed", len(world.effects("deploy-api")), 0)
