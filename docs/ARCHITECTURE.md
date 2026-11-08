@@ -36,7 +36,7 @@ sequenceDiagram
     X->>A: status and result, never the credential
 ```
 
-Order in `executor/core.py::Executor._handle`: strict decode, `verify_chain` (audience is the executor id, request digest is the agent-computable digest of tool, resource, arguments and nonce), scope, cost, guard decision, suspension check, `open_task`, `reserve`, `mark_issued`, `inject`, `perform`, `mark_done`. A failure at any step is a refusal with a recorded reason.
+Order in `executor/core.py::Executor._handle`: strict decode, `verify_chain` (audience is the executor id, request digest is the agent-computable digest of tool, resource, arguments and nonce), scope, cost, guard decision, suspension check, in-flight claim on the operation id, `open_task`, `reserve`, `mark_issued`, `inject`, `perform`, `mark_done`. A failure at any step is a refusal with a recorded reason. Evidence marks a call executed only once the target was called.
 
 Digests: the leaf proof binds the request digest, which the agent can compute. The credential binds the operation digest, which covers fields only the executor chooses (cost, expiry, verdict). The operation id is derived by the executor from tenant, task, leaf record and request digest; the wire request has no `op_id` field. A repeated identical request (same nonce) is refused as already done; a new nonce is a new operation.
 
@@ -46,16 +46,16 @@ Statuses: built (a test here exercises it), limit (built, with a stated limit), 
 
 | Layer | Status | What exists | Shown by |
 |---|---|---|---|
-| Human request | limit | `issuer/oidc.py` verifies an OIDC ID token and derives principal and tenant from claims by configuration. An ID token can be exchanged for several task roots until it expires. Per-request human approval is not wired: a `require_human` guard verdict is refused. | `tests/test_issuer.py::test_valid_token_yields_a_signed_task_root_with_claims_from_the_token` |
+| Human request | limit | `issuer/oidc.py` verifies an OIDC ID token and derives principal and tenant from claims by configuration; a task root never outlives the token. An ID token can be exchanged for several task roots until it expires. Per-request human approval is not wired: a `require_human` guard verdict is refused. | `tests/test_issuer.py::test_valid_token_yields_a_signed_task_root_with_claims_from_the_token` |
 | Issuer | limit | The executor trusts issuers listed in its trust policy, each with allowed tenants, principals, budget and depth. Keys are pinned in configuration. Key custody and rotation are not covered. Entra or Okta sit in front of the issuer and produce the ID token; they are never in the trust policy. | `tests/test_executor.py::test_unlisted_issuer_is_refused`, `demo/scenarios.py::rogue_issuer` |
 | Task root | built | Signed by the issuer; tenant, budget and scope come from signed fields. | `demo/scenarios.py::happy_path` |
 | Delegation | built | Hash-chained links, narrowing scope and budget per hop. | `demo/scenarios.py::budget_exhaustion`, `demo/scenarios.py::mid_chain_revocation` |
-| Agent | limit | The agent holds its key and chain only. Its identity is a public key with no attestation, so it is attribution, not proof. No sandbox is built. | `tests/test_enforced_process.py::test_agent_process_holds_no_secret_and_still_gets_its_effect` |
+| Agent | limit | The agent holds its key and chain only, and in separate-user mode runs as its own OS user. Its identity is a public key with no attestation, so it is attribution, not proof. No sandbox is built. | `tests/test_enforced_process.py::test_agent_process_holds_no_secret_and_still_gets_its_effect`, `tests/test_separate_user.py::test_agent_running_as_another_user_cannot_read_secrets_but_gets_its_effect` |
 | Decision | limit | Scope match, a policy-owned cost schedule with a per-call cap, and the guard's policy. A model judge is not on the request path. | `tests/test_executor.py::test_guard_policy_can_deny_a_tool_the_scope_allows`, `tests/test_executor.py::test_agent_cannot_state_its_own_cost` |
 | Credential | limit | One short-lived credential per operation, bound to the executor key, the audience and the operation digest. That binding is enforced only where the target verifies it; the fake targets here do. Where a target cannot, the credential is a short-lived narrow token held only by the executor. | `demo/scenarios.py::stolen_credential` |
 | Effect | limit | Fake targets that accept injected credentials only. No real target and no egress proxy: in enforced mode the agent must run with egress denied, and that is not enforced by this code. | `executor/targets.py::SecuredTarget` |
 | Evidence | limit | Signed v2 audit records; principal, actor, parent actor, purpose, tenant, task root and grant hash come from the verified chain; host is recorded as a claim. HMAC with a shared key: a compromised producer can forge records, and suppression is not detected. | `tests/test_evidence_identity.py::test_identity_comes_from_the_verified_chain` |
-| Detection | limit | agent-guard's persona checks (first use of a tool or resource, rate, hours) run over the signed log and route alerts to suspend or to revoking the task root. They run after the fact: the flagged call was already performed. The delegation depth check is skipped because the audit schema has no depth field. | `tests/test_operator.py::test_alert_for_a_new_resource_revokes_the_live_chain_mid_task`, `demo/scenarios.py::persona_deviation` |
+| Detection | limit | agent-guard's persona checks (first use of a tool or resource, rate, hours) run over the signed log and route alerts to suspend or to revoking the task root. Each detected event is acted on at least once and recorded once its action reaches a final outcome; routing refuses to act on a log with a row that fails verification. They run after the fact: the flagged call was already performed. The delegation depth check is skipped because the audit schema has no depth field. | `tests/test_operator.py::test_alert_for_a_new_resource_revokes_the_live_chain_mid_task`, `demo/scenarios.py::persona_deviation` |
 | Stop | limit | Effect stop: `Operator.suspend` refuses new credentials; only the named releaser resumes. Authority stop: revoke a binding, task or tenant in the ledger. A credential already issued stays valid until its ttl. | `demo/scenarios.py::kill_levers`, `tests/test_operator.py::test_suspend_refuses_new_credentials_and_only_the_releaser_resumes` |
 
 ## Kill levers
@@ -78,7 +78,8 @@ The executor writes a `release` and a `terminal` record for each call that reach
 |---|---|
 | Frame protocol, request digest, operation id | `executor/protocol.py` |
 | Orchestration of one request | `executor/core.py` |
-| Unix socket server (socket 0600 in a 0700 directory) | `executor/server.py` |
+| Unix socket server: one allowed peer user checked against kernel credentials; same-user mode uses a 0600 socket in a 0700 directory, separate-user mode a 0660 socket in a 0710 directory owned by the agent group | `executor/server.py` |
+| Peer credentials (`SO_PEERCRED`, `LOCAL_PEERCRED`) | `executor/peer.py` |
 | Operator: suspend, revoke, route alerts | `executor/operator.py` |
 | Credential minting, secret store, executor proof | `executor/credentials.py` |
 | Fake targets | `executor/targets.py` |
