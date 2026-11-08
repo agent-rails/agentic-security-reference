@@ -425,3 +425,27 @@ def test_config_reached_through_a_symlink_is_refused(world, tmp_path):
 
 def test_world_writes_its_config_private_to_the_executor_user(world):
     assert stat.S_IMODE(world.config_path.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize(
+    ("event", "outcome", "effects"),
+    [("terminal", "returned", 1), ("terminal", "unknown", 0)],
+)
+def test_a_failure_after_the_credential_was_issued_is_never_reported_as_a_refusal(
+    world, alice, monkeypatch, event, outcome, effects
+):
+    running = world.start_in_process() if effects else world.start_in_process(minter=_FailingMinter())
+    evidence = running.built.executor._evidence
+    real_write = evidence.write
+
+    def write(**fields):
+        if (fields["event"], fields["outcome"]) == (event, outcome):
+            raise OSError("disk full")
+        return real_write(**fields)
+
+    monkeypatch.setattr(evidence, "write", write)
+    response = world.send(alice, *DEPLOY, "n1")
+    assert (response["status"], response["reason"]) == ("outcome_unknown", "internal_error_after_issue")
+    assert response["op_id"]
+    assert len(world.effects("deploy-api")) == effects
+    assert world.send(alice, *DEPLOY, "n1")["status"] != "done"
