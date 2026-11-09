@@ -1,43 +1,33 @@
 # Decisions
 
-Each entry states the decision and the reason.
+## Authority
 
-## Starting point
+Human and service IAM do not transfer unchanged to an agent that can delegate work and be steered by what it reads. A signed task root and its narrowing delegation chain carry authority. The agent's public key identifies the actor for attribution. The executor, rather than the agent, decides whether an effect is allowed.
 
-- Outcome sought: a public reference architecture with an open implementation that others can cite and adopt.
-- Assumption rejected: that human and service IAM transfers to agents. Agents are ephemeral, spawn copies, act for others at machine speed and are steerable by what they read. The task and delegation chain is the unit of authority: short-lived, narrowed per hop, bound to the delegating human. Agent identity is kept for accountability.
-- Adopt formats and semantics, not infrastructure: W3C Trace Context and OpenTelemetry GenAI naming as a target (status Development), OAuth 2.0 Token Exchange on-behalf-of semantics carried by signed delegation records, SPIFFE-style naming where useful, alignment with MCP authorization.
-- Not adopted now: SPIRE, an authorization server per hop, OPA or Cedar, a central decision service, a gateway in the request path, a model judge on the request path, a networked ledger before multi-host is needed, migrating HMAC schemes to Ed25519.
+This reference does not add an authorization server per hop, a central policy service, or a networked ledger. Those components would add operational dependencies without changing the single-host demonstration.
 
 ## Multi-hop delegation
 
-Hash-chained delegation records. Each link embeds its parent's hash and is signed by the parent holder; scope and budget only narrow. One ledger per task root holds revocation status and budget; an unreachable ledger refuses the effect. RFC 8693 issuer-per-hop was rejected because it needs an online authorization server at every hop.
+Each delegation link embeds its parent's hash and is signed by the parent holder. Scope and budget can only narrow. The ledger tracks revocation and budget for each task root; an unreachable ledger refuses the effect. An issuer at every hop was rejected because it would require an online authorization server for each delegation.
 
 ## Credential custody
 
-Agents hold private signing keys for delegation proofs, but no downstream service credentials. The executor keeps credential-issuance material and mints a short-lived, operation-bound credential only after the checks pass; the fake targets hold the secret needed to verify it. Modes are advisory, enforced and isolated, as stated in the README.
-
-## The two infrastructure exceptions
-
-1. The credential injector, running inside the executor process.
-2. The task ledger.
-
-Everything else is formats and libraries.
+Agents hold private signing keys for delegation proofs. The executor keeps downstream credential material and mints an operation-bound credential only after authorization succeeds. The fake targets hold the secret needed to verify it. Real target adapters must restrict responses and errors before returning them to agents.
 
 ## Warrant and guard glue lives here
 
-The adapters between agent-warrant and agent-guard are in this repository's `executor/` package, not in an agent-guard extra. agent-guard imports nothing from agent-warrant, and a test checks it (`tests/test_pins.py::test_agent_guard_core_does_not_import_agent_warrant`).
+The adapters between agent-warrant and agent-guard belong in this repository's `executor/` package. agent-guard has no dependency on agent-warrant, as checked by `tests/test_pins.py::test_agent_guard_core_does_not_import_agent_warrant`.
 
 ## Executor design
 
-- Operation id: derived by the executor as a hash of tenant, task, leaf record and request digest, encoded as canonical JSON so that delimiters cannot be shifted between fields. There is no trusted-caller path to supply one, because the only caller on the socket is the agent; a second authenticated socket would be needed and is not built. The leaf record is included so two holders sending the same request are two operations.
-- Idempotency: the agent chooses a nonce. The same nonce from the same holder is the same operation and is refused as already done; a new nonce is a new operation. An agent that loses a response must retry with the same nonce.
-- Two digests: the agent's leaf proof binds the request digest, which it can compute. The credential binds the operation digest, which covers executor-chosen fields (cost, expiry, verdict).
-- Cost: a versioned schedule owned by the executor's configuration. A tool with no entry is refused.
-- One credential injector per target audience, sharing one issuance log and one suspension directory, because an injector carries a single audience.
-- Any failure after a credential was issued, including a definite refusal by the target, is recorded as an unknown outcome. The ledger has no state for "issued, known not performed", and its cost is never credited back automatically.
+- The executor derives the operation id from tenant, task, leaf record and request digest. Canonical JSON prevents delimiter ambiguity. The agent cannot supply an operation id, and the leaf record distinguishes two holders sending the same request.
+- The agent chooses a nonce. A retry with the same nonce reuses the operation id and its stored state; an issued but unminted operation may resume once. A new nonce creates a new operation, so a lost response must be retried with the original nonce.
+- The leaf proof binds the agent-computable request digest. The credential binds the operation digest, which also includes executor-chosen cost, expiry and verdict.
+- The executor owns a versioned cost schedule and refuses a tool without a cost entry.
+- Each tool has an injector bound to its target audience because an injector carries one audience. Injectors share an issuance log and a suspension directory.
+- A failure after a credential has been issued, including a definite target refusal, is recorded as an unknown outcome. The ledger has no state for "issued, known not performed", so cost is not credited automatically.
 - Requests that fail verification are recorded as `unverified` with no identity fields.
-- Strictness over leniency: a request with an unknown field is refused, including any identity field, rather than having the field ignored.
+- The decoder refuses unknown request fields, including identity fields supplied by an agent.
 - The ledger is opened, never created, by the executor. The demo creates it as the operator would.
 
 ## Separate-user mode
@@ -49,8 +39,8 @@ The adapters between agent-warrant and agent-guard are in this repository's `exe
 
 - A small OIDC task-root issuer maps verified ID-token claims to principal and tenant by configuration. It uses PyJWT for token verification; no token parsing is hand-written.
 - Entra, Okta and similar providers sit in front of the issuer and produce the ID token. They are not issuers in the executor's trust policy.
-- One clock: `exp`, `nbf` and `iat` are checked against the issuer's clock, with leeway of at most 60 seconds, and a root's expiry is capped at the token's `exp`.
-- The guard against tokens meant for another client is the audience and `azp`, not `typ`: most providers type access tokens plain `JWT`.
+- The issuer checks `exp`, `nbf` and `iat` against its clock with up to 60 seconds of leeway. A task root cannot outlive the ID token.
+- Audience and `azp` checks reject tokens meant for another client. The `typ` field alone is insufficient because access tokens may be typed plain `JWT`.
 - The principal claim must be a stable opaque id such as `sub` or `oid`. It may not contain `*` or any delimiter the trust policy splits prefixes on, so email addresses are refused.
 
 ## Detection responses
@@ -58,11 +48,9 @@ The adapters between agent-warrant and agent-guard are in this repository's `exe
 Alerts are routed through agent-guard's authenticated alert sink. A suspend alert suspends injection. A revoke alert revokes the task root binding in the ledger, which stops every chain below it.
 
 - Each detected event is keyed by kind, persona, tenant, time and task roots, plus the tool or resource for a first-use alert, and recorded only after its action reaches a final outcome. A time cursor was rejected because it drops hour-bucket alerts, alerts whose action failed, and every alert after a future-dated row.
-- Delivery is at least once, failing toward stopping.
+- Alert actions have at-least-once delivery. An action may repeat after a crash before its result is recorded.
 - Routing refuses to act on an audit log with a row that fails verification or parsing, rather than acting on what is left; an operator repairs the log ([OPERATIONS.md](OPERATIONS.md)).
 
-## Tooling
+## Reproducible builds
 
-- Libraries are pinned to exact PyPI versions (agent-warrant 0.1.0, toolcall-authz 0.3.0), published from those repositories with trusted publishing. CI and the README install every dependency from `requirements-ci.txt` with `--require-hashes`, so a file added to a release later is refused, and pip resolves dependencies against the lock, so a lock missing a dependency fails the install. The hashes are what PyPI served when the lock was compiled. Not covered by the lock: pip and the interpreter come from setup-python's toolcache, and pip does not check the release attestations. After changing dependencies, regenerate the lock with `uv pip compile pyproject.toml requirements-ci.in --extra dev --universal --python-version 3.13 --generate-hashes --no-header --annotation-style line -o requirements-ci.txt`; `tests/test_pins.py` fails while the lock does not satisfy the direct and build requirements in `pyproject.toml`. Actions are pinned to commit SHAs; the token is read-only.
-- The type checker is mypy in strict mode over `executor/` and `issuer/`. `demo/` and `live/` are test harnesses and are not type-checked.
-- Deferred: a weekly drift job against the libraries' main branches, and an HTML trace report.
+CI installs from the hash-locked `requirements-ci.txt`; GitHub Actions are pinned to commit SHAs. The lock covers Python packages, not the interpreter, pip, or release attestations. After changing dependencies, regenerate it with `uv pip compile pyproject.toml requirements-ci.in --extra dev --universal --python-version 3.13 --generate-hashes --no-header --annotation-style line -o requirements-ci.txt`. `tests/test_pins.py` checks direct and build requirements against the lock. Strict mypy covers `executor/` and `issuer/`; `demo/` and `live/` run under pytest.

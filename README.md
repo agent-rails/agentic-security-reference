@@ -4,11 +4,9 @@ A runnable reference for giving AI agents task-scoped authority without giving t
 
 An agent can be steered by what it reads, so this design treats it as an untrusted insider. The agent holds its own signing key and a task-scoped delegation chain, but no downstream service credential. A separate executor checks each action before performing it and records evidence.
 
-It is for engineers and security teams who run agents that deploy, move money, or touch production, and want a pattern they can read, run and adapt.
-
 ## Try it
 
-Python 3.13:
+Use Python 3.13.
 
 ```sh ci
 python -m pip install --require-hashes -r requirements-ci.txt
@@ -36,7 +34,7 @@ The tool server held the agent's signing key, while executor service credentials
 
 ## What the demo shows
 
-| # | Scenario | What it proves |
+| # | Scenario | What it checks |
 |---|---|---|
 | 1 | happy path | a human's task reaches an effect through one delegation hop |
 | 2 | budget exhaustion | a task's budget holds across every hop |
@@ -60,26 +58,28 @@ flowchart LR
     S -->|request + proof| X[Executor]
     X -->|check, reserve, credential| T[Target]
     X -->|signed evidence| E[(Audit log)]
-    E --> O[Operator: detect, suspend, revoke]
+    E --> O[Operator]
 ```
 
-1. **A human starts a task.** The issuer verifies their OIDC ID token and signs a task root: who asked, for what purpose, with what scope, budget and expiry.
+1. **A human starts a task.** The issuer verifies their OIDC ID token and signs a task root containing the principal, purpose, scope, budget and expiry.
 2. **Agents delegate.** Each hop signs a narrower link. Scope and budget can only shrink.
 3. **The executor checks every action.** It runs in its own process and holds the target credential material and its own signing and audit keys. It verifies the chain, scope, cost and policy, and reserves budget in the ledger.
 4. **It performs the effect.** It mints a short-lived credential bound to that one operation. The fake target's response contains no credential; a real integration must restrict target responses before forwarding them to an agent.
 5. **It records evidence, and the operator can stop things.** Identity comes from the verified chain, never from the request. The operator suspends new credentials or revokes authority, by hand or from alerts.
 
-Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+The [architecture](docs/ARCHITECTURE.md) traces the full request path.
 
 ## What is protected
 
 | Mode | What it is | What you can claim |
 |---|---|---|
 | Advisory | agent-guard inside the agent's process | records and steers; not a security boundary |
-| Enforced | the executor holds downstream credential material in its own process | the agent holds its signing key; the fake targets return no executor credential. Real target adapters must restrict responses and errors. Set `agent_uid` and `agent_gid` to run the agent as another OS user that cannot read the executor's files (tested on Linux in CI); without them, an agent on the same user can read them |
+| Enforced | the executor holds downstream credential material in its own process | the agent holds its signing key; fake targets return no executor credential |
 | Isolated | enforced, plus a VM or container around the agent | not built |
 
-Not covered, among others:
+Real target adapters must restrict responses and errors before returning them to an agent. For filesystem separation, run the agent under a distinct OS user with `agent_uid` and `agent_gid`; Linux CI tests this mode. The same-user mode does not protect executor files from the agent.
+
+This reference does not cover the following.
 
 - **Egress:** no egress proxy is built, so in enforced mode the agent must run with network egress denied.
 - **Real targets:** the targets are fakes that verify the credential binding; a real target that accepts any bearer token gets weaker protection.
@@ -87,14 +87,14 @@ Not covered, among others:
 - **Scale:** the ledger is one SQLite file on one host.
 - **Prompt injection itself:** this limits what a compromised agent can do, not whether it is compromised.
 
-Full list, each defense tied to a test: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+The [threat model](docs/THREAT_MODEL.md) ties each claimed defense to a test.
 
 ## Use it
 
 The code here is glue plus a demo. The primitives live in two libraries, pinned to exact PyPI releases in `pyproject.toml`:
 
-- [agent-warrant](https://github.com/agent-rails/agent-warrant): signed task roots, delegation chains, and the budget and revocation ledger.
-- [agent-guard](https://github.com/agent-rails/agent-guard) (PyPI: `toolcall-authz`): policy decisions, the credential injector, evidence and detection.
+- [agent-warrant](https://github.com/agent-rails/agent-warrant) provides signed task roots, delegation chains, and the budget and revocation ledger.
+- [agent-guard](https://github.com/agent-rails/agent-guard), published on PyPI as `toolcall-authz`, provides policy decisions, the credential injector, evidence and detection.
 
 | You have | Use | You get |
 |---|---|---|
@@ -121,7 +121,7 @@ finally:
 
 ## Why
 
-Three failure patterns recur once agents get real access:
+Three failure patterns recur once agents get real access.
 
 - **A copied token works anywhere.** A long-lived token on one machine is used from another. Here each credential is bound to one operation and the executor's key, and expires 30 seconds after issue in the demo configuration; a copy fails at the target (scenario 5).
 - **A side door skips the checks.** A service accepts a request that did not go through the normal process. In this demo, every effect passes the executor, and the fake targets accept only credentials it injected (scenarios 1 and 5).
@@ -137,16 +137,6 @@ Three failure patterns recur once agents get real access:
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | what to do when something refuses to continue |
 | [docs/LIVE_RUN.md](docs/LIVE_RUN.md) | a real model driving the agent, and what it showed |
 | [docs/RISK_MAPPING.md](docs/RISK_MAPPING.md) | a partial mapping to OWASP and NIST names |
-
-| Path | Contents |
-|---|---|
-| `executor/` | the executor: protocol, core, server, operator, credentials, targets |
-| `issuer/` | the OIDC task-root issuer |
-| `demo/` | the scenarios and the world they run in |
-| `live/` | the live run: the agent's tool server and the run script |
-| `tests/` | unit and integration tests; the scenarios also run as tests |
-
-Every fenced `sh` or `python` block in these docs is either run by `tests/test_docs_commands.py` or is a command that `.github/workflows/ci.yml` runs.
 
 ## License
 
