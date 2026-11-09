@@ -89,10 +89,10 @@ Full list, each defense tied to a test: [docs/THREAT_MODEL.md](docs/THREAT_MODEL
 
 ## Use it
 
-The code here is glue plus a demo. The primitives live in two libraries, pinned to commit SHAs in `pyproject.toml`:
+The code here is glue plus a demo. The primitives live in two libraries, pinned to exact PyPI releases in `pyproject.toml`:
 
 - [agent-warrant](https://github.com/agent-rails/agent-warrant): signed task roots, delegation chains, and the budget and revocation ledger.
-- [agent-guard](https://github.com/agent-rails/agent-guard): policy decisions, the credential injector, evidence and detection.
+- [agent-guard](https://github.com/agent-rails/agent-guard) (PyPI: `toolcall-authz`): policy decisions, the credential injector, evidence and detection.
 
 | You have | Use | You get |
 |---|---|---|

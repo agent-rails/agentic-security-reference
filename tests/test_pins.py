@@ -5,15 +5,15 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SHA = re.compile(r"@[0-9a-f]{40}$")
+EXACT_RELEASE = re.compile(r"^(agent-warrant|toolcall-authz)==\d+\.\d+\.\d+$")
 
 
-def test_library_dependencies_are_pinned_to_commit_shas():
+def test_library_dependencies_are_pinned_to_exact_releases():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
     libraries = [d for d in project["dependencies"] if d.startswith(("agent-warrant", "toolcall-authz"))]
     assert len(libraries) == 2
     for dependency in libraries:
-        assert SHA.search(dependency), dependency
+        assert EXACT_RELEASE.fullmatch(dependency), dependency
 
 
 def test_workflow_actions_are_pinned_to_commit_shas():
