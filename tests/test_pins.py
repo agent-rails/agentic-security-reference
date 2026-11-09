@@ -82,7 +82,8 @@ def test_lock_pins_every_requirement_with_hashes():
     assert entries
     for entry in entries:
         assert re.match(r"[\w.-]+==[\w.]+", entry), entry
-        assert "--hash=sha256:" in entry, entry
+        hash_lines = [line for line in entry.splitlines()[1:] if not line.lstrip().startswith("#")]
+        assert any(re.fullmatch(r"\s+--hash=sha256:[0-9a-f]{64}( \\)?", line) for line in hash_lines), entry
 
 
 def test_lock_satisfies_pyproject_and_build_requirements():
@@ -101,10 +102,14 @@ def test_lock_satisfies_pyproject_and_build_requirements():
     assert {f"{name}=={versions[name]}" for name in ("agent-warrant", "toolcall-authz")} == LIBRARY_PINS
 
 
+INSTALLER = re.compile(r"\b(pip3?|uv|pipx|poetry|conda|easy_install)\b")
+
+
 def test_ci_installs_only_from_the_hash_lock():
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
-    installs = [line.split("run:", 1)[1].strip() for line in workflow.splitlines() if "pip install" in line]
+    installs = [line.strip().removeprefix("- run:").strip() for line in workflow.splitlines() if INSTALLER.search(line)]
     assert installs == [
-        "python -m pip install --require-hashes --no-deps -r requirements-ci.txt",
+        "python -m pip install --require-hashes -r requirements-ci.txt",
         "python -m pip install --no-deps --no-build-isolation -e .",
+        "python -m pip check",
     ]
