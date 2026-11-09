@@ -63,6 +63,6 @@ Alerts are routed through agent-guard's authenticated alert sink. A suspend aler
 
 ## Tooling
 
-- Libraries are pinned to exact PyPI releases (agent-warrant 0.1.0, toolcall-authz 0.3.0), published from those repositories with trusted publishing; actions are pinned to commit SHAs; the token is read-only.
+- Libraries are pinned to exact PyPI versions (agent-warrant 0.1.0, toolcall-authz 0.3.0), published from those repositories with trusted publishing. These are version pins without hashes: pip does not check the release attestations, and a file added to a release later would still match. Actions are pinned to commit SHAs; the token is read-only.
 - The type checker is mypy in strict mode over `executor/` and `issuer/`. `demo/` and `live/` are test harnesses and are not type-checked.
 - Deferred: a weekly drift job against the libraries' main branches, and an HTML trace report.

@@ -5,15 +5,19 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-EXACT_RELEASE = re.compile(r"^(agent-warrant|toolcall-authz)==\d+\.\d+\.\d+$")
+LIBRARY_PINS = {"agent-warrant==0.1.0", "toolcall-authz==0.3.0"}
 
 
 def test_library_dependencies_are_pinned_to_exact_releases():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
-    libraries = [d for d in project["dependencies"] if d.startswith(("agent-warrant", "toolcall-authz"))]
-    assert len(libraries) == 2
-    for dependency in libraries:
-        assert EXACT_RELEASE.fullmatch(dependency), dependency
+    libraries = [d for d in project["dependencies"] if d.startswith(("agent-warrant", "toolcall-authz", "agent-guard"))]
+    assert sorted(libraries) == sorted(LIBRARY_PINS)
+
+
+def test_installed_library_versions_match_the_pins():
+    from importlib.metadata import version
+
+    assert {f"{name}=={version(name)}" for name in ("agent-warrant", "toolcall-authz")} == LIBRARY_PINS
 
 
 def test_workflow_actions_are_pinned_to_commit_shas():
