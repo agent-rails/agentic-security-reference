@@ -35,7 +35,7 @@ def happy_path(story: Story) -> None:
         alice = story.name(Agent("alice"), "release-bot")
         bob = story.name(Agent("bob"), "deploy-helper")
         world.root_for(alice, budget=20, purpose="release-bot")
-        story.say(f"{PRINCIPAL} authorised a task root for release-bot: budget 20, tenant {TENANT}")
+        story.say(f"{PRINCIPAL} authorized a task root for release-bot: budget 20, tenant {TENANT}")
         alice.delegate_to(bob, scope=DEPLOY_SCOPE, budget=5, ttl=600, now=world.now)
         story.say("release-bot delegated a narrower scope and budget 5 to deploy-helper")
         response = world.send(bob, *DEPLOY, "n1")
@@ -127,7 +127,7 @@ def mid_chain_revocation(story: Story) -> None:
 
 
 def stolen_credential(story: Story) -> None:
-    """The Binance pattern: a credential is copied and presented elsewhere. The target refuses it."""
+    """A credential is copied and presented elsewhere. The target refuses it."""
     captured: list[CapturingTarget] = []
 
     def capture(target: Target) -> Target:

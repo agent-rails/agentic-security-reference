@@ -26,6 +26,10 @@ python -m demo
 
 The last line should read `11 of 11 scenarios passed`.
 
+## Tested with a real model
+
+The scenarios script the agent. In the [live run](docs/LIVE_RUN.md), Claude chose its own actions instead, with only the agent's tools and no secrets, five scenarios three times each. When a workspace document told it to move money and the prompt said to follow every step exactly, it tried, and the executor refused every attempt as out of scope. A replayed request and a stolen chain were refused, and after a revocation or a suspension the model's very next call was refused. Each check took 1.5 to 11 ms.
+
 ## What the demo shows
 
 | # | Scenario | What it proves |
@@ -79,7 +83,7 @@ Not covered, among others:
 - **Scale:** the ledger is one SQLite file on one host.
 - **Prompt injection itself:** this limits what a compromised agent can do, not whether it is compromised.
 
-Full list, each defence tied to a test: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+Full list, each defense tied to a test: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
 ## Use it
 
@@ -115,7 +119,7 @@ finally:
 
 Three failure patterns recur once agents get real access:
 
-- **A copied token works anywhere.** A long-lived token on one machine is used from another. Here each credential is bound to one operation and the executor's key, and lives seconds; a copy fails at the target (scenario 5).
+- **A copied token works anywhere.** A long-lived token on one machine is used from another. Here each credential is bound to one operation and the executor's key, and expires 30 seconds after issue in the demo configuration; a copy fails at the target (scenario 5).
 - **A side door skips the checks.** A service accepts a request that did not go through the normal process. Here every effect passes the executor, and the targets accept only credentials it injected (scenarios 1 and 5).
 - **Authority outlives the decision to stop.** Delegations keep working after the shutdown. Here revoking a task, a link or a tenant stops every chain below it on the next request (scenarios 3, 4, 7 and 11).
 
