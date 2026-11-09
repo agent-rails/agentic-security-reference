@@ -158,6 +158,36 @@ def test_identical_request_is_not_performed_twice(world, running, alice):
     assert running.built.ledger.task_budget("tenant-a", "task-1", world.now).spent == 1
 
 
+def test_identical_request_in_a_later_second_returns_the_stored_state(world, running, alice):
+    assert world.send(alice, *DEPLOY, "n1")["status"] == "done"
+    world.clock.advance(2)
+    retry = world.send(alice, *DEPLOY, "n1")
+    assert retry["status"] == "refused"
+    assert retry["reason"] == "already_done"
+    assert len(world.effects("deploy-api")) == 1
+    assert running.built.ledger.task_budget("tenant-a", "task-1", world.now).spent == 1
+
+
+def test_retry_after_an_unknown_outcome_reports_it_and_never_runs_again(world, running, alice):
+    target = running.built.executor._targets["deploy.service"]
+    perform = target.perform
+
+    def perform_then_lose_the_response(call):
+        perform(call)
+        raise TimeoutError("response lost after the effect")
+
+    target.perform = perform_then_lose_the_response
+    first = world.send(alice, *DEPLOY, "n1")
+    target.perform = perform
+    world.clock.advance(2)
+    retry = world.send(alice, *DEPLOY, "n1")
+    assert first["status"] == "outcome_unknown"
+    assert retry["status"] == "refused"
+    assert retry["reason"] == "already_outcome_unknown"
+    assert len(world.effects("deploy-api")) == 1
+    assert running.built.ledger.task_budget("tenant-a", "task-1", world.now).spent == 1
+
+
 def test_new_nonce_is_a_new_operation(world, running, alice):
     assert world.send(alice, *DEPLOY, "n1")["status"] == "done"
     assert world.send(alice, *DEPLOY, "n2")["status"] == "done"
