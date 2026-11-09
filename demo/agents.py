@@ -14,7 +14,7 @@ from executor.protocol import Request, request_digest
 @dataclass
 class Agent:
     """An untrusted agent: it holds a delegation chain and its own key, and nothing else. It builds requests and
-    leaf possession proofs; it holds no secret and no credential."""
+    leaf possession proofs. It holds a private signing key, but no executor service credential."""
 
     name: str
     key: Ed25519PrivateKey = field(default_factory=generate_keypair)

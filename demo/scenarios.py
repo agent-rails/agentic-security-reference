@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -10,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from agent_warrant.identity import generate_keypair
 from agent_warrant.ledger import TaskLedger
@@ -26,6 +28,44 @@ from .world import DEPLOY_SCOPE, EXECUTOR_ID, PRINCIPAL, TENANT, World
 REPO = Path(__file__).resolve().parent.parent
 
 DEPLOY = ("deploy.service", "env/staging/api", {"image": "api:1"})
+CREDENTIAL_FIELDS = frozenset(
+    {
+        "mac",
+        "credential",
+        "access_token",
+        "authorization",
+        "secret",
+        "api_key",
+        "token",
+        "bearer",
+        "jwt",
+        "password",
+        "private_key",
+        "refresh_token",
+        "client_secret",
+        "session_token",
+        "x_api_key",
+    }
+)
+BEARER_VALUE = re.compile(r"\bBearer\s+[^\s,;]+", re.IGNORECASE)
+CREDENTIAL_ASSIGNMENT = re.compile(
+    r"\b(?:mac|credential|access[-_]?token|authorization|secret|api[-_]?key|token|bearer|jwt|password|private[-_]?key|refresh[-_]?token|client[-_]?secret|session[-_]?token|x[-_]?api[-_]?key)\b\s*['\"]?\s*[:=]\s*['\"]?\S+",
+    re.IGNORECASE,
+)
+
+
+def has_credential_field(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(
+            re.sub(r"[^a-z0-9]+", "_", str(key).casefold()).strip("_") in CREDENTIAL_FIELDS
+            or has_credential_field(child)
+            for key, child in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(has_credential_field(child) for child in value)
+    if isinstance(value, str):
+        return bool(BEARER_VALUE.search(value) or CREDENTIAL_ASSIGNMENT.search(value))
+    return False
 
 
 def happy_path(story: Story) -> None:
@@ -341,7 +381,7 @@ def alert_stops_live_chain(story: Story) -> None:
 
 
 def enforced_mode(story: Story) -> None:
-    """The executor runs as its own process and holds every secret; the agent process holds none."""
+    """The executor holds target credential material in another process; a stateless client sends signed frames."""
     with story.world(real_time=True) as world:
         running = world.start_process()
         agent = Agent("agent")
@@ -362,14 +402,16 @@ def enforced_mode(story: Story) -> None:
         report = json.loads(result.stdout)
         story.expect("the agent process got its effect", report["responses"][0]["status"], "done")
         secrets = [value.decode() for value in world.secrets.values()]
+        secrets += [world.audit_key.hex(), world.alert_key.hex(), (world.exec_dir / "executor.key").read_text()]
+        responses_json = json.dumps(report["responses"], separators=(",", ":"))
         story.expect(
-            "no secret in the agent's argv or environment",
+            "no executor secret in the agent's argv or environment",
             any(s in " ".join(report["argv"]) + " ".join(report["env"].values()) for s in secrets),
             False,
         )
         story.expect(
-            "no secret or credential in what the executor returned",
-            any(s in result.stdout for s in secrets) or "mac" in result.stdout,
+            "no executor secret or credential in what the executor returned",
+            any(s in responses_json for s in secrets) or has_credential_field(report["responses"]),
             False,
         )
         story.expect("socket mode", oct(stat.S_IMODE(running.socket_path.stat().st_mode)), "0o600")

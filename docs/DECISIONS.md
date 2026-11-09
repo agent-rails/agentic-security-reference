@@ -15,7 +15,7 @@ Hash-chained delegation records. Each link embeds its parent's hash and is signe
 
 ## Credential custody
 
-Agents and endpoints hold no long-lived credentials. A credential injector at the effect keeps the secrets and mints a short-lived, operation-bound credential only after the checks pass. Modes are advisory, enforced and isolated, stated plainly in the README.
+Agents hold private signing keys for delegation proofs, but no downstream service credentials. The executor keeps credential-issuance material and mints a short-lived, operation-bound credential only after the checks pass; the fake targets hold the secret needed to verify it. Modes are advisory, enforced and isolated, as stated in the README.
 
 ## The two infrastructure exceptions
 

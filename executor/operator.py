@@ -49,7 +49,7 @@ class AuditIntegrityError(Exception):
 
 class _NoMinter:
     def mint(self, *_: Any) -> Any:
-        raise RuntimeError("the operator holds no secrets and mints nothing")
+        raise RuntimeError("the operator cannot mint credentials")
 
 
 class LedgerRevocationWriter:
@@ -65,10 +65,9 @@ class LedgerRevocationWriter:
 
 
 class Operator:
-    """The trusted side that stops things. It shares the executor's ledger file and suspension directory and
-    holds no secret: its injector has an empty secret store. Kill levers: `suspend` is the effect stop (new
-    credentials are refused), `revoke_*` is the authority stop (chains stop verifying). `route_alerts` runs the
-    detector over the signed audit log and applies the configured response to each alert.
+    """The trusted operator shares the executor's ledger file and suspension directory. It loads audit and alert
+    keys, but no target credential material; its injector has an empty secret store. `suspend` stops new credentials,
+    `revoke_*` stops chains from verifying, and `route_alerts` detects and responds to events in the signed audit log.
 
     The alert key signs and checks alerts inside this process only; it protects alerts that come from a separate
     detector writing to the same sink, not alerts routed here."""

@@ -56,7 +56,7 @@ class FileSecretStore:
 
 
 class EmptySecretStore:
-    """For processes that must hold no secrets, such as the operator."""
+    """For processes that do not hold target credential material, such as the operator."""
 
     def get(self, name: str) -> bytes:
         raise KeyError(name)

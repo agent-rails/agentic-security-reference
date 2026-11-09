@@ -29,7 +29,7 @@ from .targets import EffectCall, Target, TargetRefused
 
 
 class Executor:
-    """The only process that holds secrets and performs effects.
+    """The trusted effect boundary that holds target credential material and calls targets.
 
     For each request it: strict-decodes the frame; verifies the delegation chain against the trust policy, the
     ledger's revocations, this executor's audience and the request digest; checks the leaf scope and a
