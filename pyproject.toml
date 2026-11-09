@@ -4,7 +4,8 @@ version = "0.1.0"
 description = "Reference architecture and runnable demo for agentic security: task-scoped delegated authority, credential custody, effect budgets, evidence and kill switches."
 readme = "README.md"
 requires-python = ">=3.13"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "voltagebots" }]
 dependencies = [
     "PyJWT[crypto]==2.15.1",
@@ -19,7 +20,7 @@ Repository = "https://github.com/agent-rails/agentic-security-reference"
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
