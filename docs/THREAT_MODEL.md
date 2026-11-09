@@ -46,6 +46,7 @@ Each row cites a test that exercises the defence under its fixture. Where the de
 - Detection is after the fact. The first in-scope but unusual call is performed before an alert can suspend anything. The delegation depth check is skipped.
 - One ID token can be exchanged for several task roots until it expires, and the caller chooses each root's subject key: whoever holds a valid ID token, including a thief, can mint roots for a key of their choosing until the token expires. Roots never outlive the token.
 - Issuer refusal messages carry the underlying reason, for example a JWKS fetch error. A service in front of the issuer should log them and return a generic refusal.
+- Lost responses: if an agent loses the executor's answer and retries with a new nonce, the executor sees a new operation and the effect can run twice. A retry must reuse the nonce. It is then refused as in progress, or as already done, and never runs again (`tests/test_executor.py::test_identical_request_is_not_performed_twice`, `tests/test_executor.py::test_replay_while_the_first_request_is_in_flight_leaves_the_first_one_alone`). A real target should also deduplicate on its own business key, because the executor cannot tell two nonces for the same intent apart.
 - Denial of service: connections are capped at 64 and a frame must arrive within 10 seconds, but a target call has no time limit, so the allowed agent user can hold every slot with slow effects. Frames are capped at 1 MiB.
 - Alert routing fails loud: one unreadable audit row, or an unreadable record of routed alerts, stops automatic response until an operator repairs it ([OPERATIONS.md](OPERATIONS.md)). Delivery is at least once: a crash between an action and its record re-applies the action on the next scan.
 - After the ledger marks an operation issued, a failure returns `outcome_unknown` with the `op_id`, not a refusal. If the failure was writing evidence, the effect may have run with no terminal evidence row.
@@ -54,3 +55,16 @@ Each row cites a test that exercises the defence under its fixture. Where the de
 - Prompt injection itself, memory poisoning, code execution inside the agent, and supply-chain compromise of the agent's tooling are not addressed; the design limits what a compromised agent can do, not whether it is compromised.
 - Time: expiry checks use the executor's clock and a 5 second skew allowance in agent-warrant.
 - Performance is not measured here.
+
+## Independent cross-check
+
+On 2026-11-09, agent-warrant at `e2b4e24` was threat modelled with Grim Prompter (quick mode, agentic AI architecture, library revision `3642a31`), run read-only through a second model vendor. It modelled the library alone, without this executor, so it reports design hypotheses, not confirmed defects. Its report is private review material and is not part of this repository.
+
+| Scenario it raised | Where this repository stands |
+|---|---|
+| A caller does not bind the scope check, the cost and the downstream operation to the same exact action | covered: the executor checks scope and a policy-owned cost, and binds the credential to the operation digest; the target checks the arguments against it |
+| A lost response and a retry with a new operation id cause a second effect | not covered before this check; now stated above under lost responses |
+| A credential issued before a revocation is used after it | stated limit: an issued credential lives until its ttl |
+| Unsigned roots naming a `did:web` issuer tie up verifier workers in name resolution before any signature is checked | not applicable here, because issuer keys are pinned in configuration; it applies to users of agent-warrant's `did:web` resolver, whose own threat model already discloses the name-resolution timeout |
+| Code running as the executor's OS user alters the ledger | stated limit: same-user mode is not a custody boundary; separate-user mode is the answer |
+

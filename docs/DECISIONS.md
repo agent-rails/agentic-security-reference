@@ -31,7 +31,7 @@ The adapters between agent-warrant and agent-guard are in this repository's `exe
 ## Executor design
 
 - Operation id: derived by the executor as a hash of tenant, task, leaf record and request digest, encoded as canonical JSON so that delimiters cannot be shifted between fields. There is no trusted-caller path to supply one, because the only caller on the socket is the agent; a second authenticated socket would be needed and is not built. The leaf record is included so two holders sending the same request are two operations.
-- Idempotency: the agent chooses a nonce. The same nonce from the same holder is the same operation and is refused as already done; a new nonce is a new operation.
+- Idempotency: the agent chooses a nonce. The same nonce from the same holder is the same operation and is refused as already done; a new nonce is a new operation. An agent that loses a response must retry with the same nonce.
 - Two digests: the agent's leaf proof binds the request digest, which it can compute. The credential binds the operation digest, which covers executor-chosen fields (cost, expiry, verdict).
 - Cost: a versioned schedule owned by the executor's configuration. A tool with no entry is refused.
 - One credential injector per target audience, sharing one issuance log and one suspension directory, because an injector carries a single audience.
