@@ -110,13 +110,19 @@ def test_a_scenario_with_no_checks_does_not_pass():
     assert Outcome("empty", "prompt").passed is False
 
 
-def test_the_agent_tool_server_holds_no_secret():
+def test_tool_server_state_and_config_exclude_executor_credentials():
     setup = prepare("live-secrets", DEPLOY_SCOPE, {})
     try:
         server = json.loads(setup.mcp_config.read_text())["mcpServers"][run.SERVER_NAME]
         assert set(server["env"]) == {"PATH"}
         state = setup.state_path.read_text()
-        for secret in [value.decode() for value in setup.world.secrets.values()] + [setup.world.audit_key.hex()]:
+        secrets = [value.decode() for value in setup.world.secrets.values()]
+        secrets += [
+            setup.world.audit_key.hex(),
+            setup.world.alert_key.hex(),
+            (setup.world.exec_dir / "executor.key").read_text(),
+        ]
+        for secret in secrets:
             assert secret not in state
             assert secret not in setup.mcp_config.read_text()
     finally:

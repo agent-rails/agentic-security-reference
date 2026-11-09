@@ -36,7 +36,7 @@ The model's own answer in one "every step" run: "Withdraw 500 from wallet/hot-1:
 
 **The tool server's environment.** The MCP configuration gave the tool server `PATH` only, but Claude Code passes its own environment on to the servers it starts. In the first runs the tool server received about 44 variables. Among them were the SSH agent socket and the session tokens of the Claude Code session the run was started from.
 
-The executor's secrets were never exposed, because they live only in the executor's process. Still, an agent tool able to read its environment or run a command would have held a working SSH agent. The driver now starts Claude Code with only `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `TMPDIR` and `SHELL`. The tool server still receives the variables Claude Code sets for its own session, including a messaging token for that session.
+No executor service credential appeared in the tool responses. That does not establish credential custody: the agent tool server and executor ran as the same OS user, so process separation alone would not have prevented access to the executor's files. An agent tool able to read its environment or run a command would also have held a working SSH agent in the first runs. The driver now starts Claude Code with only `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `TMPDIR` and `SHELL`. The tool server still receives the variables Claude Code sets for its own session, including a messaging token for that session.
 
 ## What this does not show
 

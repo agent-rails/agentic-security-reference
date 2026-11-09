@@ -12,7 +12,7 @@ Each row cites a test that exercises the defense under its fixture. Where the de
 
 | Threat | Defense | Test |
 |---|---|---|
-| Agent reads a secret or credential | secrets live in the executor process; the agent's argv, environment and responses contain none | `tests/test_enforced_process.py::test_agent_process_holds_no_secret_and_still_gets_its_effect`, `tests/test_enforced_process.py::test_response_never_carries_a_credential` |
+| Agent receives an executor service credential through the request path | the stateless demo agent's argv, environment and responses contain no executor credential; agent tooling still holds its own signing key | `tests/test_enforced_process.py::test_stateless_agent_receives_no_executor_secret_and_still_gets_effect`, `tests/test_enforced_process.py::test_response_never_carries_a_credential` |
 | Agent reads the executor's files | in separate-user mode the agent runs as another OS user; the executor refuses secrets, keys and a ledger that are not mode 0600, and the socket admits only that user, checked against the kernel's peer credentials. The configuration and audit log are closed to the agent only if the deployer makes them so; the test checks that every file its fixture creates is unreadable to the agent | `tests/test_separate_user.py::test_agent_running_as_another_user_cannot_read_secrets_but_gets_its_effect`, `tests/test_separate_user.py::test_executor_user_is_not_an_allowed_peer_in_separate_user_mode` |
 | Another local user reaches the socket | in separate-user mode the socket directory and socket are open only to the agent group | `tests/test_separate_user.py::test_user_outside_the_agent_group_cannot_reach_the_socket` |
 | Agent claims an identity, tenant or cost | the strict decoder refuses unknown fields; identity comes from the verified chain; cost comes from a policy-owned schedule | `tests/test_evidence_identity.py::test_identity_fields_supplied_by_the_agent_are_refused_and_never_recorded`, `tests/test_executor.py::test_agent_cannot_state_its_own_cost` |
@@ -55,18 +55,7 @@ Each row cites a test that exercises the defense under its fixture. Where the de
 - `routed.jsonl`, the record of alerts already acted on, is unsigned local state: whoever can write it as the operator's user can suppress or repeat a response. Delivery is at least once only for events still inside the scanned window.
 - Locks on the alert state and the issuance log are `flock` locks on a local filesystem; a network filesystem shared between hosts is not supported.
 - Prompt injection itself, memory poisoning, code execution inside the agent, and supply-chain compromise of the agent's tooling are not addressed; the design limits what a compromised agent can do, not whether it is compromised.
+- Target results and errors are forwarded without filtering. Real target adapters must restrict returned fields and error details so they cannot disclose credentials.
 - Time: expiry checks use the executor's clock and a 5 second skew allowance in agent-warrant.
-- Performance: the live run measured 1.5 to 11 ms per executor call on one laptop. No load or concurrency test exists.
-
-## Independent cross-check
-
-On 2026-11-09, agent-warrant at `e2b4e24` was threat modelled with Grim Prompter (quick mode, agentic AI architecture, library revision `3642a31`), run read-only through a second model vendor. It modelled the library alone, without this executor, so it reports design hypotheses, not confirmed defects. Its report is private review material and is not part of this repository.
-
-| Scenario it raised | Where this repository stands |
-|---|---|
-| A caller does not bind the scope check, the cost and the downstream operation to the same exact action | covered: the executor checks scope and a policy-owned cost, and binds the credential to the operation digest; the target checks the arguments against it |
-| A lost response and a retry with a new operation id cause a second effect | stated limit: see lost responses above |
-| A credential issued before a revocation is used after it | stated limit: an issued credential lives until its ttl |
-| Unsigned roots naming a `did:web` issuer tie up verifier workers in name resolution before any signature is checked | not applicable here, because issuer keys are pinned in configuration; it applies to users of agent-warrant's `did:web` resolver, whose own threat model already discloses the name-resolution timeout |
-| Code running as the executor's OS user alters the ledger | stated limit: same-user mode is not a custody boundary; separate-user mode is the answer |
+- Performance: the live run measured 1.5 to 11.3 ms per tool-server round trip to the executor on one laptop. No load or concurrency test exists.
 
