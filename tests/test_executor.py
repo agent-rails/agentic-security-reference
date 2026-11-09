@@ -188,6 +188,46 @@ def test_retry_after_an_unknown_outcome_reports_it_and_never_runs_again(world, r
     assert running.built.ledger.task_budget("tenant-a", "task-1", world.now).spent == 1
 
 
+def test_retry_after_a_crash_between_marking_issued_and_minting_runs_once(world, running, alice):
+    ledger = running.built.ledger
+    mark_issued = ledger.mark_issued
+
+    def mark_issued_then_crash(*args, **kwargs):
+        mark_issued(*args, **kwargs)
+        raise RuntimeError("crash after mark_issued, before minting")
+
+    ledger.mark_issued = mark_issued_then_crash
+    first = world.send(alice, *DEPLOY, "n1")
+    ledger.mark_issued = mark_issued
+    world.clock.advance(2)
+    retry = world.send(alice, *DEPLOY, "n1")
+    again = world.send(alice, *DEPLOY, "n1")
+    assert first["status"] == "refused"
+    assert retry["status"] == "done"
+    assert again["reason"] == "already_done"
+    assert len(world.effects("deploy-api")) == 1
+    assert len((world.exec_dir / "issuance.jsonl").read_text().splitlines()) == 1
+    assert ledger.task_budget("tenant-a", "task-1", world.now).spent == 1
+
+
+def test_retry_after_the_reservation_expired_unissued_is_refused_as_released(world, running, alice):
+    ledger = running.built.ledger
+    mark_issued = ledger.mark_issued
+
+    def crash_before_marking_issued(*args, **kwargs):
+        raise RuntimeError("crash before mark_issued")
+
+    ledger.mark_issued = crash_before_marking_issued
+    world.send(alice, *DEPLOY, "n1")
+    ledger.mark_issued = mark_issued
+    world.clock.advance(running.built.executor._reservation_ttl + 1)
+    retry = world.send(alice, *DEPLOY, "n1")
+    assert retry["status"] == "refused"
+    assert retry["reason"] == "already_released"
+    assert world.effects("deploy-api") == []
+    assert ledger.task_budget("tenant-a", "task-1", world.now).spent == 0
+
+
 def test_new_nonce_is_a_new_operation(world, running, alice):
     assert world.send(alice, *DEPLOY, "n1")["status"] == "done"
     assert world.send(alice, *DEPLOY, "n2")["status"] == "done"
