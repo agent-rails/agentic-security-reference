@@ -63,6 +63,6 @@ Alerts are routed through agent-guard's authenticated alert sink. A suspend aler
 
 ## Tooling
 
-- Libraries are pinned to exact PyPI versions (agent-warrant 0.1.0, toolcall-authz 0.3.0), published from those repositories with trusted publishing. These are version pins without hashes: pip does not check the release attestations, and a file added to a release later would still match. Actions are pinned to commit SHAs; the token is read-only.
+- Libraries are pinned to exact PyPI versions (agent-warrant 0.1.0, toolcall-authz 0.3.0), published from those repositories with trusted publishing. CI and the README install every dependency from `requirements-ci.txt` with `--require-hashes`, so a file added to a release later is refused. pip does not check the release attestations. After changing dependencies, regenerate the lock with `uv pip compile pyproject.toml requirements-ci.in --extra dev --universal --python-version 3.13 --generate-hashes --no-header --annotation-style line -o requirements-ci.txt`; `tests/test_pins.py` fails while the lock does not satisfy `pyproject.toml`. Actions are pinned to commit SHAs; the token is read-only.
 - The type checker is mypy in strict mode over `executor/` and `issuer/`. `demo/` and `live/` are test harnesses and are not type-checked.
 - Deferred: a weekly drift job against the libraries' main branches, and an HTML trace report.
