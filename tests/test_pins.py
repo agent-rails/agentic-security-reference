@@ -4,6 +4,9 @@ import sys
 import tomllib
 from pathlib import Path
 
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+
 ROOT = Path(__file__).resolve().parent.parent
 LIBRARY_PINS = {"agent-warrant==0.1.0", "toolcall-authz==0.3.0"}
 
@@ -61,3 +64,47 @@ def test_type_check_is_strict_and_runs_in_ci():
     assert config["strict"] is True
     assert "executor" in config["files"]
     assert "- run: mypy" in (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+
+
+def locked_versions():
+    versions = {}
+    for line in (ROOT / "requirements-ci.txt").read_text().splitlines():
+        if not line or line[0] in " #-":
+            continue
+        name, version = line.split(";")[0].split()[0].split("==")
+        versions[canonicalize_name(name)] = version
+    return versions
+
+
+def test_lock_pins_every_requirement_with_hashes():
+    text = (ROOT / "requirements-ci.txt").read_text()
+    entries = re.split(r"\n(?=\S)", text.strip())
+    assert entries
+    for entry in entries:
+        assert re.match(r"[\w.-]+==[\w.]+", entry), entry
+        assert "--hash=sha256:" in entry, entry
+
+
+def test_lock_satisfies_pyproject_and_build_requirements():
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    required = [
+        *data["project"]["dependencies"],
+        *data["project"]["optional-dependencies"]["dev"],
+        *data["build-system"]["requires"],
+    ]
+    versions = locked_versions()
+    for text in required:
+        requirement = Requirement(text)
+        name = canonicalize_name(requirement.name)
+        assert name in versions, text
+        assert requirement.specifier.contains(versions[name], prereleases=True), (text, versions[name])
+    assert {f"{name}=={versions[name]}" for name in ("agent-warrant", "toolcall-authz")} == LIBRARY_PINS
+
+
+def test_ci_installs_only_from_the_hash_lock():
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    installs = [line.split("run:", 1)[1].strip() for line in workflow.splitlines() if "pip install" in line]
+    assert installs == [
+        "python -m pip install --require-hashes --no-deps -r requirements-ci.txt",
+        "python -m pip install --no-deps --no-build-isolation -e .",
+    ]

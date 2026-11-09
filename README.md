@@ -11,7 +11,8 @@ It is for engineers and security teams who run agents that deploy, move money, o
 Python 3.13:
 
 ```sh ci
-python -m pip install -e ".[dev]"
+python -m pip install --require-hashes --no-deps -r requirements-ci.txt
+python -m pip install --no-deps --no-build-isolation -e .
 ruff check
 ruff format --check
 mypy
