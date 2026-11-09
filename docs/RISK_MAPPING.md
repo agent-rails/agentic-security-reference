@@ -11,7 +11,7 @@ Sources:
 
 | Id | Name | What this repository does | Not covered |
 |---|---|---|---|
-| ASI01 | Agent Goal Hijack | limits what a hijacked agent can do (scope, budget, expiry); flags persona deviations after the fact (`demo/scenarios.py::persona_deviation`) | preventing the hijack |
+| ASI01 | Agent Goal Hijack | limits what a hijacked agent can do (scope, budget, expiry); flags persona deviations after the fact (`demo/scenarios.py::persona_deviation`); a live model told to obey an injected document was refused ([LIVE_RUN.md](LIVE_RUN.md)) | preventing the hijack |
 | ASI02 | Tool Misuse | scope match, cost cap and guard policy before every effect (`tests/test_executor.py::test_tool_outside_scope_is_refused`) | misuse inside granted scope and budget |
 | ASI03 | Identity & Privilege Abuse | task-scoped authority narrowed per hop; the agent holds no secret (`demo/scenarios.py::budget_exhaustion`, `tests/test_enforced_process.py::test_agent_process_holds_no_secret_and_still_gets_its_effect`) | agent attestation; key custody on the agent side |
 | ASI04 | Agentic Supply Chain Vulnerabilities | nothing | all of it |

@@ -17,13 +17,14 @@ sequenceDiagram
     participant H as Human
     participant I as Issuer
     participant A as Agent
+    participant S as Sub-agent
     participant X as Executor
     participant L as Ledger
     participant T as Target
     H->>I: OIDC ID token
     I->>A: signed TaskRoot (subject = agent key)
-    A->>A: delegate narrower ChainLink to a sub-agent
-    A->>X: task_root, links, leaf_proof, tool, resource, args, nonce
+    A->>S: narrower ChainLink (subject = sub-agent key)
+    S->>X: task_root, links, leaf_proof, tool, resource, args, nonce
     X->>L: revocation check for root, links, task, tenant
     X->>X: verify chain, scope, cost cap, guard policy
     X->>L: reserve cost against task pool and every link cap
@@ -33,7 +34,7 @@ sequenceDiagram
     T->>X: result
     X->>L: mark done
     X->>X: write signed evidence
-    X->>A: status and result, never the credential
+    X->>S: status and result, never the credential
 ```
 
 Order in `executor/core.py::Executor._handle`: strict decode, `verify_chain` (audience is the executor id, request digest is the agent-computable digest of tool, resource, arguments and nonce), scope, cost, guard decision, suspension check, in-flight claim on the operation id, `open_task`, `reserve`, `mark_issued`, `inject`, `perform`, `mark_done`. Before the ledger marks an operation issued, a failure at any step is a refusal with a recorded reason. After that, a failure is never reported as a refusal: it returns `outcome_unknown` with the `op_id`. A ledger failure after the effect gives `effect_done_ledger_not_updated`; any other failure gives `internal_error_after_issue`, and its terminal evidence row may be missing. Reconcile such an operation against the target's own record ([OPERATIONS.md](OPERATIONS.md)). Evidence marks a call executed only once the target was called.
@@ -52,8 +53,8 @@ Statuses: built (a test here exercises it), limit (built, with a stated limit), 
 | Delegation | built | Links narrowing scope and budget per hop. Signature and hash-chain checks are agent-warrant's; rejecting an altered link is not tested here. | `demo/scenarios.py::budget_exhaustion`, `demo/scenarios.py::mid_chain_revocation` |
 | Agent | limit | The agent holds its key and chain only, and in separate-user mode runs as its own OS user. Its identity is a public key with no attestation, so it is attribution, not proof. No sandbox is built. | `tests/test_enforced_process.py::test_agent_process_holds_no_secret_and_still_gets_its_effect`, `tests/test_separate_user.py::test_agent_running_as_another_user_cannot_read_secrets_but_gets_its_effect` |
 | Decision | limit | Scope match, a policy-owned cost schedule with a per-call cap, and the guard's policy. A model judge is not on the request path. | `tests/test_executor.py::test_guard_policy_can_deny_a_tool_the_scope_allows`, `tests/test_executor.py::test_agent_cannot_state_its_own_cost` |
-| Credential | limit | One short-lived credential per operation, bound to the executor key, the audience and the operation digest. That binding is enforced only where the target verifies it; the fake targets here do. Where a target cannot, the credential is a short-lived narrow token held only by the executor. | `demo/scenarios.py::stolen_credential` |
-| Effect | limit | Fake targets that accept injected credentials only. No real target and no egress proxy: in enforced mode the agent must run with egress denied, and that is not enforced by this code. | `executor/targets.py::SecuredTarget` |
+| Credential | limit | One short-lived credential per operation, bound to the executor key, the audience and the operation digest. That binding is enforced only where the target verifies it; the fake targets here do. A target that cannot verify it should receive a short-lived, narrow token held only by the executor; that path is not built here. | `demo/scenarios.py::stolen_credential` |
+| Effect | limit | Fake targets that accept injected credentials only. No real target and no egress proxy: in enforced mode the agent must run with egress denied, and that is not enforced by this code. | `tests/test_executor.py::test_happy_path_performs_the_effect_once_and_spends_the_cost` |
 | Evidence | limit | Signed v2 audit records; principal, actor, parent actor, purpose, tenant, task root and grant hash come from the verified chain; host is recorded as a claim. HMAC with a shared key: a compromised producer can forge records, and suppression is not detected. | `tests/test_evidence_identity.py::test_identity_comes_from_the_verified_chain` |
 | Detection | limit | agent-guard's persona checks (first use of a tool or resource, rate, hours) run over the signed log and route alerts to suspend or to revoking the task root. Each detected event is acted on at least once and recorded once its action reaches a final outcome; routing refuses to act on a log with a row that fails verification. They run after the fact: the flagged call was already performed. The delegation depth check is skipped because the audit schema has no depth field. | `tests/test_operator.py::test_alert_for_a_new_resource_revokes_the_live_chain_mid_task`, `demo/scenarios.py::persona_deviation` |
 | Stop | limit | Effect stop: `Operator.suspend` refuses new credentials; only the named releaser resumes. Authority stop: revoke a binding, task or tenant in the ledger. A credential already issued stays valid until its ttl. | `demo/scenarios.py::kill_levers`, `tests/test_operator.py::test_suspend_refuses_new_credentials_and_only_the_releaser_resumes` |
@@ -71,7 +72,7 @@ The alert key protects alerts written by a separate detector. Alerts the operato
 
 ## MCP
 
-No MCP client is built here. The design fit: the executor would be the MCP client and hold the credentials, obtain a separate token per MCP server audience, and never forward a task grant or any token it received. The MCP authorization specification requires a server not to accept or pass through tokens issued for other audiences (as read on 2026-11-07, version 2026-07-28).
+No MCP client is built here. The design fit: the executor would be the MCP client and hold the credentials, obtain a separate token per MCP server audience, and never forward a task grant or any token it received. The MCP authorization specification requires a server to accept only tokens issued for it and never to accept or transit any other token (version 2026-07-28, checked on 2026-11-09).
 
 ## Kill levers
 
@@ -81,11 +82,11 @@ No MCP client is built here. The design fit: the executor would be the MCP clien
 
 ## Scope of revocation and budgets
 
-Revocation and budgets are properties of one ledger. The executor checks the ledger it is configured with. A delegation presented to a different executor, or to a service that does not consult that ledger, is not stopped by it. A cross-organisation stop therefore works only through an executor that checks the root's ledger. The ledger is a single SQLite file on one host. Several processes on that host may share it; several hosts may not.
+Revocation and budgets are properties of one ledger. The executor checks the ledger it is configured with. A delegation presented to a different executor, or to a service that does not consult that ledger, is not stopped by it. A cross-organization stop therefore works only through an executor that checks the root's ledger. The ledger is a single SQLite file on one host. Several processes on that host may share it; several hosts may not.
 
 ## Evidence and assurance
 
-The executor writes a `release` and a `terminal` record for each call that reaches the credential injector, and a `decision` record for each refusal before that. Detection reads them. agent-witness, which compares an agent's narration with the audit log, is a separate assurance layer and is not wired here.
+The executor writes a `release` and a `terminal` record for each call that reaches the credential injector, and a `decision` record for each refusal before that. Detection reads them.
 
 ## Components in this repository
 
@@ -99,4 +100,5 @@ The executor writes a `release` and a `terminal` record for each call that reach
 | Credential minting, secret store, executor proof | `executor/credentials.py` |
 | Fake targets | `executor/targets.py` |
 | OIDC task-root issuer | `issuer/oidc.py` |
-| Scenarios | `demo/scenarios.py` |
+| Scenarios and the world they run in | `demo/scenarios.py`, `demo/world.py` |
+| Live run: the agent's MCP tool server and the run script | `live/agent_tools.py`, `live/run.py` |
