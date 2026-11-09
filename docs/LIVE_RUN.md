@@ -41,7 +41,7 @@ The executor's secrets were never exposed, because they live only in the executo
 ## What this does not show
 
 - **Detection timing.** The watcher polls every 50 ms and starts alert routing when it sees the rollback. The 11 to 54 ms from the rollback's audit record to the suspension is that poll delay plus the detector run (3 to 4 ms) plus the suspension. It is not a real detection schedule. In a deployment, detection runs on a schedule, and the gap is that interval.
-- **The replay reason.** A replayed request is refused as `reservation_refused` ("op_id was already used for a different operation") when it arrives in a later second, because the operation's expiry is computed from the current time. Within the same second it is refused as `already_done`. In both cases no second effect runs.
+- **The replay reason.** In these runs a replayed request was refused as `reservation_refused` ("op_id was already used for a different operation") when it arrived in a later second, because the operation's expiry was computed from the current time. Within the same second it was refused as `already_done`. In both cases no second effect ran. The executor now reuses the stored expiry, so a replay in a later second is refused as `already_done`; the results file records the earlier behaviour.
 - **OS users.** The executor and the agent ran as the same OS user. Separate-user mode is tested only in CI.
 - **Restriction of the model.** It relies on Claude Code's flags. Managed settings, if a machine has them, still apply.
 - **Scope.** One model, three runs per scenario, fake targets and one host. These are observations, not a benchmark.
