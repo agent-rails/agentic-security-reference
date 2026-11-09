@@ -1,19 +1,19 @@
 # Decisions
 
-Each entry states the decision and the reason. Dates are 2026.
+Each entry states the decision and the reason.
 
-## Step 0
+## Starting point
 
-- Outcome sought (2026-11-07): a public reference architecture with an open implementation that others can cite and adopt. Client deployments are proof points; a product stays a later decision.
+- Outcome sought: a public reference architecture with an open implementation that others can cite and adopt.
 - Assumption rejected: that human and service IAM transfers to agents. Agents are ephemeral, spawn copies, act for others at machine speed and are steerable by what they read. The task and delegation chain is the unit of authority: short-lived, narrowed per hop, bound to the delegating human. Agent identity is kept for accountability.
 - Adopt formats and semantics, not infrastructure: W3C Trace Context and OpenTelemetry GenAI naming as a target (status Development), OAuth 2.0 Token Exchange on-behalf-of semantics carried by signed delegation records, SPIFFE-style naming where useful, alignment with MCP authorization.
 - Not adopted now: SPIRE, an authorization server per hop, OPA or Cedar, a central decision service, a gateway in the request path, a model judge on the request path, a networked ledger before multi-host is needed, migrating HMAC schemes to Ed25519.
 
-## B1: multi-hop delegation
+## Multi-hop delegation
 
 Hash-chained delegation records. Each link embeds its parent's hash and is signed by the parent holder; scope and budget only narrow. One ledger per task root holds revocation status and budget; an unreachable ledger refuses the effect. RFC 8693 issuer-per-hop was rejected because it needs an online authorization server at every hop.
 
-## B2: credential custody
+## Credential custody
 
 Agents and endpoints hold no long-lived credentials. A credential injector at the effect keeps the secrets and mints a short-lived, operation-bound credential only after the checks pass. Modes are advisory, enforced and isolated, stated plainly in the README.
 
@@ -26,7 +26,7 @@ Everything else is formats and libraries.
 
 ## Warrant and guard glue lives here
 
-The adapters between agent-warrant and agent-guard are in this repository's `executor/` package, not in an agent-guard extra. agent-guard imports nothing from agent-warrant, and a test checks it (`tests/test_pins.py::test_agent_guard_core_does_not_import_agent_warrant`). This replaces the earlier plan to ship a `[warrant]` extra in agent-guard.
+The adapters between agent-warrant and agent-guard are in this repository's `executor/` package, not in an agent-guard extra. agent-guard imports nothing from agent-warrant, and a test checks it (`tests/test_pins.py::test_agent_guard_core_does_not_import_agent_warrant`).
 
 ## Executor design
 
@@ -57,12 +57,12 @@ The adapters between agent-warrant and agent-guard are in this repository's `exe
 
 Alerts are routed through agent-guard's authenticated alert sink. A suspend alert suspends injection. A revoke alert revokes the task root binding in the ledger, which stops every chain below it.
 
-- Each detected event is keyed by kind, persona, tenant, time and task roots, plus the tool or resource for a first-use alert, and recorded only after its action reaches a final outcome. A time cursor was tried and rejected: it dropped hour-bucket alerts, alerts whose action failed, and every alert after a future-dated row.
+- Each detected event is keyed by kind, persona, tenant, time and task roots, plus the tool or resource for a first-use alert, and recorded only after its action reaches a final outcome. A time cursor was rejected because it drops hour-bucket alerts, alerts whose action failed, and every alert after a future-dated row.
 - Delivery is at least once, failing toward stopping.
 - Routing refuses to act on an audit log with a row that fails verification or parsing, rather than acting on what is left; an operator repairs the log ([OPERATIONS.md](OPERATIONS.md)).
 
 ## Tooling
 
 - Libraries are pinned to commit SHAs; actions are pinned to commit SHAs; the token is read-only.
-- The type checker is mypy in strict mode over `executor/` and `issuer/`.
+- The type checker is mypy in strict mode over `executor/` and `issuer/`. `demo/` and `live/` are test harnesses and are not type-checked.
 - Deferred: a weekly drift job against the libraries' main branches, and an HTML trace report.
