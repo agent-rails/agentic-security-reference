@@ -1,6 +1,5 @@
-"""The agent's side of a live run: a stdio MCP server that exposes deployment tools to a model and turns each call
-into a signed request to the executor. Its configured state holds the agent's private signing key and delegation
-chain, but no executor service credential."""
+"""The live run's stdio MCP server. It sends signed effect requests to the executor and serves workspace documents
+locally. Its state holds the agent's signing key and delegation chain, but no executor service credential."""
 
 from __future__ import annotations
 

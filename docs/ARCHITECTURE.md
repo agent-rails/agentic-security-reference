@@ -2,13 +2,13 @@
 
 ## Primitives
 
-1. Identity: an agent is a public key. It is named in evidence for attribution; it is not authorization.
-2. Task grant: a signed `TaskRoot` (tenant, principal, purpose, budget, max depth, scope, expiry) and `ChainLink` records that narrow it per hop.
-3. Check on every effect: scope, cost cap and guard policy, evaluated in the executor.
-4. Stateful effect budgets: the task pool and each link's cap, reserved in the ledger per operation.
-5. Evidence: signed audit records stamped with identity from the verified chain.
-6. Inventory: derived from evidence by agent-guard (`guard inventory`); it covers only agents whose effects pass the executor.
-7. Detection: deterministic persona checks over the evidence log, off the request path.
+- An agent's public key identifies it in evidence for attribution; it does not authorize an effect.
+- The issuer signs a `TaskRoot` with tenant, principal, purpose, budget, maximum depth, scope and expiry. Each `ChainLink` narrows that grant.
+- The executor checks scope, a cost cap and guard policy before each effect.
+- The ledger reserves cost against the task pool and each delegation link.
+- Audit records take identity from the verified chain.
+- `guard inventory` derives an inventory from evidence for agents whose effects pass the executor.
+- Deterministic persona checks inspect the evidence log outside the request path.
 
 ## Request to effect
 
@@ -37,9 +37,9 @@ sequenceDiagram
     X->>S: status and target result (fake target returns no credential)
 ```
 
-Order in `executor/core.py::Executor._handle`: strict decode, `verify_chain` (audience is the executor id, request digest is the agent-computable digest of tool, resource, arguments and nonce), scope, cost, guard decision, suspension check, in-flight claim on the operation id, `open_task`, `reserve`, `mark_issued`, `inject`, `perform`, `mark_done`. Before the ledger marks an operation issued, a failure at any step is a refusal with a recorded reason. After that, a failure is never reported as a refusal: it returns `outcome_unknown` with the `op_id`. A ledger failure after the effect gives `effect_done_ledger_not_updated`; any other failure gives `internal_error_after_issue`, and its terminal evidence row may be missing. Reconcile such an operation against the target's own record ([OPERATIONS.md](OPERATIONS.md)). Evidence marks a call executed only once the target was called.
+`Executor._handle` validates the request and chain, checks scope, cost and policy, then reserves budget before issuing a credential and calling the target. It marks the operation done after the target returns. A failure before `mark_issued` completes is normally a refusal; a crash inside that call can still persist the issued state. After issuance, mint failures and errors during or after the target call return `outcome_unknown` with the operation id. Other injector refusals remain refusals. A same-nonce retry reconciles stored state; see [Operations](OPERATIONS.md) before using a new nonce. Evidence marks a call executed only after the target was called.
 
-Digests: the leaf proof binds the request digest, which the agent can compute. The credential binds the operation digest, which covers fields only the executor chooses (cost, expiry, verdict). The operation id is derived by the executor from tenant, task, leaf record and request digest; the wire request has no `op_id` field. A repeated identical request (same nonce) is refused as already done; a new nonce is a new operation.
+The leaf proof binds the agent-computable request digest, covering tool, resource, arguments and nonce. The credential binds the operation digest, which also covers executor-chosen fields such as cost, expiry and verdict. The executor derives the operation id from tenant, task, leaf record and request digest; the wire request has no `op_id`. A same-nonce retry reuses that operation id. A completed effect is not repeated, while an issued operation that has not minted a credential can resume once. A new nonce creates a new operation.
 
 ## Layer coverage
 
@@ -72,13 +72,13 @@ The alert key protects alerts written by a separate detector. Alerts the operato
 
 ## MCP
 
-No MCP client is built here. The design fit: the executor would be the MCP client and hold the credentials, obtain a separate token per MCP server audience, and never forward a task grant or any token it received. The [MCP authorization specification](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization) requires a server to accept only tokens issued for it and never to accept or transit any other token (version 2026-07-28, checked on 2026-11-09).
+The live tool server uses MCP over stdio. This repository does not implement an HTTP MCP client or protected server. In a future HTTP integration, the executor would act as the client and obtain a token for each server audience. The [MCP authorization specification](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization) requires servers to accept tokens issued for them and prohibits token passthrough (version 2026-07-28, checked on 2026-11-09).
 
 ## Kill levers
 
-- Effect stop: the executor checks the shared suspension state before reserving anything; a suspended executor reserves no budget.
-- Authority stop: revocations are rows in the ledger. `verify_chain` asks the ledger about the root, every link, the task and the tenant, and refuses the request when the ledger cannot be read.
-- The two are independent: resuming does not undo a revocation, and a revocation does not need a suspension.
+- The executor checks shared suspension state before reserving budget. Suspension stops new effects without changing delegation records.
+- Revocation records live in the ledger. `verify_chain` checks the root, every link, the task and the tenant, and refuses a request if the ledger cannot be read.
+- Resuming the executor does not undo a revocation. A revocation does not require suspension.
 
 ## Scope of revocation and budgets
 
@@ -94,11 +94,11 @@ The executor writes a `release` and a `terminal` record for each call that reach
 |---|---|
 | Frame protocol, request digest, operation id | `executor/protocol.py` |
 | Orchestration of one request | `executor/core.py` |
-| Unix socket server: one allowed peer user checked against kernel credentials; same-user mode uses a 0600 socket in a 0700 directory, separate-user mode a 0660 socket in a 0710 directory owned by the agent group | `executor/server.py` |
+| Unix socket server with kernel peer-credential checks; same-user mode uses a 0600 socket in a 0700 directory, while separate-user mode uses a 0660 socket in a 0710 directory owned by the agent group | `executor/server.py` |
 | Peer credentials (`SO_PEERCRED`, `LOCAL_PEERCRED`) | `executor/peer.py` |
-| Operator: suspend, revoke, route alerts | `executor/operator.py` |
+| Suspension, revocation and alert routing | `executor/operator.py` |
 | Credential minting, secret store, executor proof | `executor/credentials.py` |
 | Fake targets | `executor/targets.py` |
 | OIDC task-root issuer | `issuer/oidc.py` |
 | Scenarios and the world they run in | `demo/scenarios.py`, `demo/world.py` |
-| Live run: the agent's MCP tool server and the run script | `live/agent_tools.py`, `live/run.py` |
+| Agent-side MCP tool server and live-run driver | `live/agent_tools.py`, `live/run.py` |
