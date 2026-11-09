@@ -179,6 +179,12 @@ class Executor:
         try:
             try:
                 self._ledger.open_task(TaskRootResult(valid=True, reason="ok", root=root, checked_at=now), now)
+                stored = self._ledger.reservation(root.tenant_id, root.task_id, op_id, now)
+                expires_at = (
+                    stored.expires_at
+                    if stored is not None
+                    else min(now + self._reservation_ttl, root.expires_at, *(link.expires_at for link in chain.links))
+                )
                 operation = Operation(
                     op_id=op_id,
                     tenant_id=root.tenant_id,
@@ -189,9 +195,7 @@ class Executor:
                     args_digest=args_digest(request.args),
                     cost=cost,
                     verdict_allowed=True,
-                    expires_at=min(
-                        now + self._reservation_ttl, root.expires_at, *(link.expires_at for link in chain.links)
-                    ),
+                    expires_at=expires_at,
                 )
                 reservation = self._ledger.reserve(operation, chain.links, now)
             except Refused as err:
